@@ -38,7 +38,7 @@ RAS.roster = {
     "Orion: Orithal",
     "Primal: Primalshock,Primalclap",
     "Raging: Dragingbbc",
-    "Razz: Catgptee, Icekyoob, Razzcobizzle",
+    "Razz: Catgptee, Icekyoob, Razzcobizzle, Razzwalker",
     "Ria: Ria, Ría",
     "Rick: Artia, Prophetkid, Delisle",
     "Salty: Saltycheeks, Mioveil",

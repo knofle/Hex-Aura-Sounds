@@ -47,6 +47,7 @@ RAS.roster = {
     "Toobad: Grimgrípper, Tubad",
     "Yoshi: Yôshì",
     "Zeph: Zephalina, Zephael",
+    "Exo: Exorzon",
     "Pug1",
     "Pug2",
     "Pug3",

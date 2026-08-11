@@ -28,7 +28,7 @@ RAS.roster = {
     "Eif: Eifwing, Eifbloom, Eifmonk",
     "Happy: Killerrabbit, Nowei, Gleep, Happytail",
     "James: Meistebear",
-    "Knofle: Knofle, Buddybro, Medivhsnuts",
+    "Knofle: Knofle, Buddybro, Medivhsnuts, Knafle",
     "Laughigh: Laughigh",
     "Matt: Mattacate, Mattacat",
     "Meraud: Meraud, Gamergirl",

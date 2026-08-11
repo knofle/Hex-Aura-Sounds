@@ -2,7 +2,7 @@
 ## Title: Hex Aura Sounds
 ## Notes: Plays a per-raider sound when a raid member gains a tracked aura on a specific boss
 ## Author: Knofle
-## Version: 0.1.3
+## Version: 0.1.31
 ## SavedVariables: RAS_DB
 ## IconTexture: Interface\AddOns\HexAuraSounds\Media\icon
 

@@ -5,6 +5,7 @@
 ## Version: 0.1.31
 ## SavedVariables: RAS_DB
 ## IconTexture: Interface\AddOns\HexAuraSounds\Media\icon
+## X-Wago-ID: nGv7WqNx
 
 raiders.lua
 bosses.lua

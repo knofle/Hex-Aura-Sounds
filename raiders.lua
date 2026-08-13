@@ -23,7 +23,7 @@ RAS.roster = {
     "Cazties: Cazties",
     "Chiki: Chikidh, Chikidin, Chikidk",
     "Choko: Chokomilky,Chokodary, Chokoletmilk, Chokonelk",
-    "Dedge: Dedgejr",
+    "Dedge: Dedgejr, Labubupeek",
     "Demi: Demiel",
     "Eif: Eifwing, Eifbloom, Eifmonk",
     "Happy: Killerrabbit, Nowei, Gleep, Happytail",

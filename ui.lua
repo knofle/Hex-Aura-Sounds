@@ -377,8 +377,8 @@ local function build()
             local hov = b:CreateTexture(nil, "HIGHLIGHT"); hov:SetAllPoints(); hov:SetColorTexture(1, 1, 1, 0.05)
             b.t = fs(b, 12, GOLD); b.t:SetPoint("CENTER"); b.t:SetText(tlabels[tier]); b.tier = tier
             b.bar = b:CreateTexture(nil, "OVERLAY"); b.bar:SetPoint("BOTTOMLEFT", 1, 1); b.bar:SetPoint("BOTTOMRIGHT", -1, 1); b.bar:SetHeight(3); b.bar:SetColorTexture(GREEN[1], GREEN[2], GREEN[3], 0.95); b.bar:Hide()
-            b.gdot = b:CreateFontString(nil, "OVERLAY", "GameFontNormal"); b.gdot:SetFont(STANDARD_TEXT_FONT, 26, ""); b.gdot:SetTextColor(GREEN[1], GREEN[2], GREEN[3]); b.gdot:SetText("."); b.gdot:SetPoint("BOTTOMLEFT", b.t, "BOTTOMRIGHT", 3, 0); b.gdot:Hide()
-            b:SetScript("OnClick", function() RAS.db.selTier = tier; RAS.db.selName = (RAS:GroupItems(tier)[1] or ""); win:Refresh() end)
+            b.gdot = b:CreateFontString(nil, "OVERLAY", "GameFontNormal"); b.gdot:SetFont(STANDARD_TEXT_FONT, 26, ""); b.gdot:SetTextColor(GREEN[1], GREEN[2], GREEN[3]); b.gdot:SetText("."); b.gdot:SetPoint("BOTTOMLEFT", b.t, "BOTTOMRIGHT", 3, 8); b.gdot:Hide()
+            b:SetScript("OnClick", function() RAS.db.selTier = tier; win:Refresh() end)
             win.tier1[#win.tier1 + 1] = b; i = i + 1
         end
     end
@@ -395,10 +395,10 @@ local function build()
             b.icon = b:CreateTexture(nil, "ARTWORK"); b.icon:SetSize(30, 30); b.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
             b.t = fs(b, 11, TEXT)
             b.bar = b:CreateTexture(nil, "OVERLAY"); b.bar:SetPoint("BOTTOMLEFT", 1, 1); b.bar:SetPoint("BOTTOMRIGHT", -1, 1); b.bar:SetHeight(3); b.bar:SetColorTexture(GREEN[1], GREEN[2], GREEN[3], 0.95); b.bar:Hide()
-            b.gdot = b:CreateFontString(nil, "OVERLAY", "GameFontNormal"); b.gdot:SetFont(STANDARD_TEXT_FONT, 26, ""); b.gdot:SetTextColor(GREEN[1], GREEN[2], GREEN[3]); b.gdot:SetText("."); b.gdot:SetPoint("BOTTOMLEFT", b.t, "BOTTOMRIGHT", 2, 0); b.gdot:Hide()
+            b.gdot = b:CreateFontString(nil, "OVERLAY", "GameFontNormal"); b.gdot:SetFont(STANDARD_TEXT_FONT, 26, ""); b.gdot:SetTextColor(GREEN[1], GREEN[2], GREEN[3]); b.gdot:SetText("."); b.gdot:SetPoint("BOTTOMLEFT", b.t, "BOTTOMRIGHT", 2, 8); b.gdot:Hide()
             b:SetScript("OnEnter", function() if b.fullname then GameTooltip:SetOwner(b, "ANCHOR_TOP"); GameTooltip:SetText(b.fullname, 1, 1, 1); GameTooltip:Show() end end)
             b:SetScript("OnLeave", function() GameTooltip:Hide() end)
-            b:SetScript("OnClick", function() if b.name then RAS.db.selName = b.name; win:Refresh() end end)
+            b:SetScript("OnClick", function() if b.name then RAS.db.selByTier = RAS.db.selByTier or {}; RAS.db.selByTier[RAS.db.selTier] = b.name; win:Refresh() end end)
             win.t2pool[i] = b
         end
         return b

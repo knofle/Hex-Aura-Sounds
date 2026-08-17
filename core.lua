@@ -34,8 +34,8 @@ local defaults = {
     channel          = "Master",
     groups           = {},     -- groups[tier][name] = { [spellID]=enabled }  (tier: raid/mplus/custom)
     gdelay           = {},     -- gdelay[tier][name] = { [spellID]=true }  spells using the delayed (d-prefixed) sound
-    selTier          = "raid", -- currently shown category
-    selName          = "",     -- currently shown boss/dungeon/custom slot
+    selTier          = "raid", -- last shown category (persisted)
+    selByTier        = {},     -- [tier] = last shown boss/dungeon/custom slot (persisted)
     charRaider       = {},     -- [characterName] = raiderName (assigned in-game, saved)
     backend          = "unit", -- "unit" (per-raider via raidN token) or "global" (no token;
                                -- one sound per spell; nonfunctional on 12.1, kept as a switch)
@@ -215,9 +215,10 @@ end
 function RAS:Selected()
     local st = self.db.selTier
     if st ~= "raid" and st ~= "mplus" and st ~= "custom" then st = "raid"; self.db.selTier = st end
-    local items, sn, ok = self:GroupItems(st), self.db.selName, false
+    self.db.selByTier = self.db.selByTier or {}
+    local items, sn, ok = self:GroupItems(st), self.db.selByTier[st], false
     for _, n in ipairs(items) do if n == sn then ok = true break end end
-    if not ok then sn = items[1] or ""; self.db.selName = sn end
+    if not ok then sn = items[1] or ""; self.db.selByTier[st] = sn end
     return st, sn
 end
 
@@ -632,6 +633,13 @@ f:SetScript("OnEvent", function(_, event, ...)
                 RAS_DB.groups.custom["1"] = RAS_DB.groups.custom["1"] or {}
                 for id, on in pairs(RAS_DB.spells) do RAS_DB.groups.custom["1"][id] = on end
                 RAS_DB.spells = nil
+            end
+            -- migrate old single selName into per-tier selection memory
+            if RAS_DB.selName and RAS_DB.selName ~= "" then
+                RAS_DB.selByTier = RAS_DB.selByTier or {}
+                local t = RAS_DB.selTier or "raid"
+                if not RAS_DB.selByTier[t] then RAS_DB.selByTier[t] = RAS_DB.selName end
+                RAS_DB.selName = nil
             end
         end
 

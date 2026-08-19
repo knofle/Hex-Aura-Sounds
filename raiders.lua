@@ -30,6 +30,7 @@ RAS.roster = {
     "James: Meistebear",
     "Knofle: Knofle, Buddybro, Medivhsnuts, Knafle",
     "Laughigh: Laughigh",
+    "Legacy: Légacy",
     "Matt: Mattacate, Mattacat",
     "Meraud: Meraud, Gamergirl",
     "Mike: Globadier, Laflame",

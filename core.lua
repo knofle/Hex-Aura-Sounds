@@ -283,9 +283,19 @@ local function totalSpellCount(self)
 end
 RAS.TotalSpellCount = totalSpellCount
 
+-- the aura-sound API is protected: it can't be touched in combat or while the
+-- player is dead/ghost, or the client throws ADDON_ACTION_BLOCKED.
+local function canRegister()
+    return not InCombatLockdown() and not UnitIsDeadOrGhost("player")
+end
+
 function RAS:Rebuild()
-    if InCombatLockdown() and not self.db.combatSafe then
+    if not canRegister() then
         self.pendingRebuild = true
+        if not self._retry then
+            self._retry = true
+            C_Timer.After(1, function() self._retry = nil; if self.pendingRebuild then RAS:Rebuild() end end)
+        end
         return
     end
     self.pendingRebuild = nil
@@ -506,7 +516,7 @@ SlashCmdList.RAS = function(msg)
     elseif cmd == "players" then
         print("|cff33ff99RAS raiders|r (" .. #RAS.playerOrder .. "):")
         for _, nm in ipairs(RAS.playerOrder) do print("   " .. nm .. "  |cff888888" .. RAS.playerSound[nm] .. "|r") end
-    elseif cmd == "rebuild" then RAS:Rebuild(); print("RAS: rebuilt (" .. (RAS.lastCount or 0) .. " regs)")
+    elseif cmd == "rebuild" or cmd == "apply" then RAS:Rebuild(); print("RAS: applied (" .. (RAS.lastCount or 0) .. " sound registrations)")
     elseif cmd == "status" then RAS:PrintStatus()
     elseif cmd == "test"  then RAS:TestPlay(arg)
     elseif cmd == "toggle" then RAS.db.enabled = not RAS.db.enabled; RAS:Rebuild(); print("RAS enabled: " .. tostring(RAS.db.enabled))
@@ -608,12 +618,23 @@ end
 -- registered they cover whatever gets pulled; the first pull is covered by the
 -- zone-in / ready-check registration.
 -- ---------------------------------------------------------------------------
+-- Defer registration one frame so the protected AddAuraSound call runs in a
+-- clean (untainted) execution context instead of inside the event handler,
+-- which can carry taint and get ADDON_ACTION_BLOCKED. (Same pattern as CCS.)
+function RAS:ScheduleRebuild()
+    if self._scheduled then return end
+    self._scheduled = true
+    C_Timer.After(0, function() self._scheduled = nil; RAS:Rebuild() end)
+end
+
 f:RegisterEvent("ADDON_LOADED")
 f:RegisterEvent("PLAYER_LOGIN")
 f:RegisterEvent("PLAYER_ENTERING_WORLD")
 f:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 f:RegisterEvent("GROUP_ROSTER_UPDATE")
 f:RegisterEvent("PLAYER_REGEN_ENABLED")
+f:RegisterEvent("PLAYER_UNGHOST")
+f:RegisterEvent("PLAYER_ALIVE")
 f:RegisterEvent("START_PLAYER_COUNTDOWN")
 f:RegisterEvent("READY_CHECK")
 
@@ -648,8 +669,9 @@ f:SetScript("OnEvent", function(_, event, ...)
         or event == "ZONE_CHANGED_NEW_AREA"
         or event == "GROUP_ROSTER_UPDATE"      -- roster shuffle changes token->raider
         or event == "PLAYER_REGEN_ENABLED"     -- left combat (e.g. after a wipe)
+        or event == "PLAYER_UNGHOST" or event == "PLAYER_ALIVE"  -- resurrected / released
         or event == "START_PLAYER_COUNTDOWN"   -- pull timer: register right before the pull
         or event == "READY_CHECK" then         -- common pre-pull signal
-        RAS:Rebuild()
+        RAS:ScheduleRebuild()
     end
 end)

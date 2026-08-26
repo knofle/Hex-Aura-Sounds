@@ -49,6 +49,7 @@ RAS.roster = {
     "Yoshi: Yôshì",
     "Zeph: Zephalina, Zephael, Ayunami",
     "Exo: Exorzon",
+    "Saeross: Shikuriko",
     "Pug1",
     "Pug2",
     "Pug3",

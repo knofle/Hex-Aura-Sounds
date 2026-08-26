@@ -624,7 +624,11 @@ end
 function RAS:ScheduleRebuild()
     if self._scheduled then return end
     self._scheduled = true
-    C_Timer.After(0, function() self._scheduled = nil; RAS:Rebuild() end)
+    -- settle delay: register a beat AFTER the triggering event so we're clear of
+    -- the combat-end / zone-in window where AddAuraSound can still be blocked
+    -- even though InCombatLockdown() already reports out of combat. The debounce
+    -- also collapses bursts of GROUP_ROSTER_UPDATE into a single rebuild.
+    C_Timer.After(0.5, function() self._scheduled = nil; RAS:Rebuild() end)
 end
 
 f:RegisterEvent("ADDON_LOADED")

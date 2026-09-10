@@ -42,7 +42,7 @@ RAS.roster = {
     "Razz: Catgptee, Icekyoob, Razzcobizzle, Razzwalker",
     "Ria: Ria, Ría",
     "Rick: Artia, Prophetkid, Delisle",
-    "Salty: Saltycheeks, Mioveil",
+    "Salty: Saltycheeks, Mioveil, Gripcheeks",
     "Sharly: Sharly, Sharzy",
     "Slomy: Slomy, Slo",
     "Toobad: Grimgrípper, Tubad",

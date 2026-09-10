@@ -50,9 +50,11 @@ RAS.roster = {
     "Zeph: Zephalina, Zephael, Ayunami",
     "Exo: Exorzon",
     "Shiku: Shikuriko",
+    "Kebab: Kebabvoker",
     "Pug1",
     "Pug2",
     "Pug3",
     "Pug4",
     "Pug5",
+    "Trial",
 }

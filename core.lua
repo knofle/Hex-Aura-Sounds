@@ -285,8 +285,18 @@ RAS.TotalSpellCount = totalSpellCount
 
 -- the aura-sound API is protected: it can't be touched in combat or while the
 -- player is dead/ghost, or the client throws ADDON_ACTION_BLOCKED.
+-- AddOn restriction state (12.x): protected calls (AddAuraSound/RemoveAuraSound)
+-- can stay blocked for a moment after InCombatLockdown() clears, until the
+-- engine's Combat/Encounter restriction goes Inactive. Track it authoritatively
+-- via ADDON_RESTRICTION_STATE_CHANGED and gate on it too.
+local _restrictions = {}
+local function restricted() return next(_restrictions) ~= nil end
+
 local function canRegister()
-    return not InCombatLockdown() and not UnitIsDeadOrGhost("player")
+    if InCombatLockdown() then return false end
+    if UnitIsDeadOrGhost("player") then return false end
+    if restricted() then return false end
+    return true
 end
 
 function RAS:Rebuild()
@@ -299,16 +309,17 @@ function RAS:Rebuild()
         return
     end
     self.pendingRebuild = nil
-    clearRegistrations()
 
     self.lastCount, self.lastMissing = 0, 0
     if not self.db.enabled or not self:HasAPI() then
+        clearRegistrations(); self._lastSig = nil
         if self.RefreshUI then self:RefreshUI() end
         return
     end
 
     local spells = allEnabled(self)
     if #spells == 0 then
+        clearRegistrations(); self._lastSig = nil
         if self.RefreshUI then self:RefreshUI() end
         return
     end
@@ -326,21 +337,20 @@ function RAS:Rebuild()
         return v   -- can't d-prefix a raw path or numeric ID
     end
 
-    local count, missing = 0, 0
-
+    -- 1) build the DESIRED registration set (no API calls yet)
+    local desired, sigparts, missing = {}, {}, 0
     if self.db.backend == "global" then
-        -- no unit token: one sound per spell (cannot know who got it)
         for _, s in ipairs(spells) do
             local base = (RAS.spellSounds and RAS.spellSounds[s]) or self.db.globalSound
             local sound = self:ResolveSound(delayedSet[s] and delaySound(base) or base)
             if sound then
-                if registerOne(s, nil, sound, self.db.playRemoved) then count = count + 1 end
+                desired[#desired + 1] = { s = s, token = nil, sound = sound }
+                sigparts[#sigparts + 1] = s .. "|*|" .. tostring(sound)
             else
                 missing = missing + 1
             end
         end
     else
-        -- unit backend: register every enabled spell against each character's sound
         local roster = self:BuildRoster()
         for token, name in pairs(roster) do
             local base
@@ -352,13 +362,36 @@ function RAS:Rebuild()
             if base then
                 for _, s in ipairs(spells) do
                     local sound = self:ResolveSound(delayedSet[s] and delaySound(base) or base)
-                    if sound and registerOne(s, token, sound, self.db.playRemoved) then count = count + 1 end
+                    if sound then
+                        desired[#desired + 1] = { s = s, token = token, sound = sound }
+                        sigparts[#sigparts + 1] = s .. "|" .. token .. "|" .. tostring(sound)
+                    end
                 end
             else
                 missing = missing + 1   -- character present but not assigned to a raider
             end
         end
     end
+
+    -- 2) skip entirely if the desired set is identical to the last CLEAN apply.
+    -- This kills redundant re-registration from frequent GROUP_ROSTER_UPDATE etc.,
+    -- so there are far fewer protected calls that could hit an unsafe window.
+    table.sort(sigparts)
+    local sig = table.concat(sigparts, ";")
+    if sig == self._lastSig then
+        self.lastMissing = missing
+        if self.RefreshUI then self:RefreshUI() end
+        return
+    end
+
+    -- 3) apply: clear old, register desired, note if anything was rejected (blocked)
+    clearRegistrations()
+    local count, blocked = 0, false
+    for _, d in ipairs(desired) do
+        if registerOne(d.s, d.token, d.sound, self.db.playRemoved) then count = count + 1 else blocked = true end
+    end
+    -- only cache the signature on a clean apply, so a blocked attempt re-tries next time
+    self._lastSig = blocked and nil or sig
 
     self.lastCount, self.lastMissing = count, missing
     if self.RefreshUI then self:RefreshUI() end
@@ -379,8 +412,8 @@ function RAS:Probe()
         print("|cffff4040RAS probe:|r C_UnitAuras.AddAuraSound missing. Need 12.1+.")
         return
     end
-    if InCombatLockdown() then
-        print("|cffff4040RAS probe:|r leave combat first.")
+    if not canRegister() then
+        print("|cffff4040RAS probe:|r not safe right now (in combat / dead / restricted). Try again when clear.")
         return
     end
 
@@ -469,8 +502,8 @@ SlashCmdList.RAS = function(msg)
             print("RAS: /has testfire <file:Name | path> [spellID] [unitToken]   e.g. /has testfire file:breath 1459 raid6")
         elseif not RAS:HasAPI() then
             print("|cffff4040RAS:|r API missing")
-        elseif InCombatLockdown() then
-            print("|cffff4040RAS:|r out of combat only")
+        elseif not canRegister() then
+            print("|cffff4040RAS:|r not safe right now (in combat / dead / restricted)")
         elseif not UnitExists(token) then
             print("|cffff4040RAS:|r no unit at '" .. token .. "'")
         else
@@ -628,7 +661,7 @@ function RAS:ScheduleRebuild()
     -- the combat-end / zone-in window where AddAuraSound can still be blocked
     -- even though InCombatLockdown() already reports out of combat. The debounce
     -- also collapses bursts of GROUP_ROSTER_UPDATE into a single rebuild.
-    C_Timer.After(0.5, function() self._scheduled = nil; RAS:Rebuild() end)
+    C_Timer.After(1, function() self._scheduled = nil; RAS:Rebuild() end)
 end
 
 f:RegisterEvent("ADDON_LOADED")
@@ -641,6 +674,7 @@ f:RegisterEvent("PLAYER_UNGHOST")
 f:RegisterEvent("PLAYER_ALIVE")
 f:RegisterEvent("START_PLAYER_COUNTDOWN")
 f:RegisterEvent("READY_CHECK")
+if Enum and Enum.AddOnRestrictionType then f:RegisterEvent("ADDON_RESTRICTION_STATE_CHANGED") end
 
 f:SetScript("OnEvent", function(_, event, ...)
     if event == "ADDON_LOADED" then
@@ -677,5 +711,22 @@ f:SetScript("OnEvent", function(_, event, ...)
         or event == "START_PLAYER_COUNTDOWN"   -- pull timer: register right before the pull
         or event == "READY_CHECK" then         -- common pre-pull signal
         RAS:ScheduleRebuild()
+
+    elseif event == "ADDON_RESTRICTION_STATE_CHANGED" then
+        -- authoritative "protected calls (il)legal" signal; more reliable than
+        -- PLAYER_REGEN_ENABLED at the combat/encounter edge.
+        local rType, rState = ...
+        local T = Enum and Enum.AddOnRestrictionType
+        local S = Enum and Enum.AddOnRestrictionState
+        if T and S and (rType == T.Combat or rType == T.Encounter) then
+            if rState == S.Active then
+                _restrictions[rType] = true
+            elseif rState == S.Inactive then
+                _restrictions[rType] = nil
+                if not restricted() then
+                    RAS:ScheduleRebuild()   -- flush anything deferred while restricted
+                end
+            end
+        end
     end
 end)

@@ -29,7 +29,7 @@ RAS.roster = {
     "Happy: Killerrabbit, Nowei, Gleep, Happytail, Weirdowl",
     "James: Meistebear",
     "Knofle: Knofle, Buddybro, Medivhsnuts, Knafle",
-    "Lauhigh: Laughigh",
+    "Lauhigh: Lauhigh",
     "Legacy: Légacy",
     "Matt: Mattacate, Mattacat",
     "Meraud: Meraud, Gamergirl",

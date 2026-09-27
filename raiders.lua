@@ -19,6 +19,7 @@ RAS.roster = {
     "Bart: Mcdanus, Mcdornol",
     "Bates: Batesbates, Bates, Batesimus, Daddybates",
     "Bingle: Bingleblood, Binglebub, Binglebark, Binglebop, Binglebutt",
+    "Bobbin: Bobbinw",
     "Buu: Buu, Buffint, Pycc, Buubble, Buuqt",
     "Cazties: Cazties",
     "Chiki: Chikidh, Chikidin, Chikidk",

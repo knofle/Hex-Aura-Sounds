@@ -49,23 +49,10 @@ local defaults = {
 }
 
 -- ---------------------------------------------------------------------------
--- 12.1 sanctioned aura-sound registration API
--- ---------------------------------------------------------------------------
--- Signature discovered on the Midnight PTR (not documented):
---   handle = C_UnitAuras.AddAuraSound(trigger, sound)
---     trigger : Enum.UnitAuraSoundTrigger  (Added=0, ApplicationsIncreased=1, Removed=2)
---     sound   : { spellID=, unitToken=, soundFileName= | soundKitID= }
+-- Aura-sound API (12.1)
+--   handle = C_UnitAuras.AddAuraSound(trigger, { spellID=, unitToken=, soundFileName= | soundKitID=, outputChannel= })
 --   C_UnitAuras.RemoveAuraSound(handle)
---
--- THREE things this build assumes and the probe (/has probe) exists to prove:
---   1. AddAuraSound accepts raid1..raidN / partyN unit tokens (only
---      player/target/focus/boss1-8 were confirmed; plain names are rejected).
---   2. The remove function is named RemoveAuraSound.
---   3. Whether the API is combat-locked like the 12.0 private-aura sound APIs.
---      If the probe shows it is NOT combat-locked, flip /has combatsafe on and
---      registration will happen at ENCOUNTER_START so the FIRST pull has sound.
---      Left off by default, so first pull needs a pre-pull arm; re-pulls are
---      registered on leaving combat automatically.
+-- Protected: can't be called in combat, while dead, or while restricted.
 -- ---------------------------------------------------------------------------
 local CUA             = C_UnitAuras
 local AddAuraSound    = CUA and CUA.AddAuraSound
@@ -189,7 +176,6 @@ local function clearRegistrations()
         wipe(live)
     end
 end
-RAS.ClearRegistrations = clearRegistrations
 
 -- per-spell output channel (set in the UI), else the main Output channel
 local function spellChannel(spellID)
@@ -220,26 +206,6 @@ local function registerOne(spellID, token, sound, alsoRemoved)
         return true
     end
     return false, handle
-end
-
--- register the global spell set plus an optional extra set against one token
-local function registerSet(self, token, sound, globalSpells, extra)
-    local n, seen = 0, {}
-    for _, s in ipairs(globalSpells) do
-        if not seen[s] then
-            seen[s] = true
-            if registerOne(s, token, sound, self.db.playRemoved) then n = n + 1 end
-        end
-    end
-    if extra then
-        for s in pairs(extra) do
-            if not seen[s] then
-                seen[s] = true
-                if registerOne(s, token, sound, self.db.playRemoved) then n = n + 1 end
-            end
-        end
-    end
-    return n
 end
 
 -- ---------------------------------------------------------------------------
@@ -330,12 +296,8 @@ local function totalSpellCount(self)
 end
 RAS.TotalSpellCount = totalSpellCount
 
--- the aura-sound API is protected: it can't be touched in combat or while the
--- player is dead/ghost, or the client throws ADDON_ACTION_BLOCKED.
--- AddOn restriction state (12.x): protected calls (AddAuraSound/RemoveAuraSound)
--- can stay blocked for a moment after InCombatLockdown() clears, until the
--- engine's Combat/Encounter restriction goes Inactive. Track it authoritatively
--- via ADDON_RESTRICTION_STATE_CHANGED and gate on it too.
+-- registration is blocked in combat, while dead, and while a Combat/Encounter
+-- restriction is active (tracked via ADDON_RESTRICTION_STATE_CHANGED)
 local _restrictions = {}
 local function restricted() return next(_restrictions) ~= nil end
 
@@ -420,9 +382,7 @@ function RAS:Rebuild()
         end
     end
 
-    -- 2) skip entirely if the desired set is identical to the last CLEAN apply.
-    -- This kills redundant re-registration from frequent GROUP_ROSTER_UPDATE etc.,
-    -- so there are far fewer protected calls that could hit an unsafe window.
+    -- 2) skip if nothing changed since the last clean apply
     table.sort(sigparts)
     local sig = (self.db.channel or "Master") .. "#" .. table.concat(sigparts, ";")   -- channel change must re-register
     if sig == self._lastSig then
@@ -442,137 +402,6 @@ function RAS:Rebuild()
 
     self.lastCount, self.lastMissing = count, missing
     if self.RefreshUI then self:RefreshUI() end
-end
-
--- ---------------------------------------------------------------------------
--- Probe: the load-bearing feasibility test. Tries every registration shape the
--- sanctioned API might accept and reports which ones it takes. Run out of combat
--- in a real raid group. "accepted" only means the registration was taken; it
--- still needs the aura to actually apply to make a sound.
--- ---------------------------------------------------------------------------
-local PROBE_SPELL = 1459                                -- Arcane Intellect, always exists
--- placeholder path: AddAuraSound does NOT validate the file at registration, so
--- this only tests token validity and is never actually played by the probe
-local PROBE_SOUND = "Interface\\AddOns\\" .. ADDON .. "\\Sounds\\_probe.ogg"
-function RAS:Probe()
-    if not self:HasAPI() then
-        print("|cffff4040RAS probe:|r C_UnitAuras.AddAuraSound missing. Need 12.1+.")
-        return
-    end
-    if not canRegister() then
-        print("|cffff4040RAS probe:|r not safe right now (in combat / dead / restricted). Try again when clear.")
-        return
-    end
-
-    local function try(labelStr, opts)
-        local ok, handle = pcall(AddAuraSound, TRIGGER_ADDED, opts)
-        if ok and handle then
-            print("   " .. labelStr .. ": |cff33ff99accepted|r")
-            if RemoveAuraSound then pcall(RemoveAuraSound, handle) end
-        else
-            print("   " .. labelStr .. ": |cffff4040rejected|r " .. tostring(handle))
-        end
-    end
-
-    print("|cff33ff99RAS probe|r  spell=" .. PROBE_SPELL)
-
-    -- unit-token shapes (these are what per-raider scoping needs)
-    try("player token", { spellID = PROBE_SPELL, unitToken = "player", soundFileName = PROBE_SOUND })
-    if IsInRaid() then
-        local n = GetNumGroupMembers()
-        try("raid1 token", { spellID = PROBE_SPELL, unitToken = "raid1", soundFileName = PROBE_SOUND })
-        if n > 1 then
-            try("raid" .. n .. " token", { spellID = PROBE_SPELL, unitToken = "raid" .. n, soundFileName = PROBE_SOUND })
-        end
-        local g = UnitGUID("raid1")
-        if g then try("raid1 GUID as token", { spellID = PROBE_SPELL, unitToken = g, soundFileName = PROBE_SOUND }) end
-        local nm = UnitName("raid1")
-        if nm then try("raid1 name as token", { spellID = PROBE_SPELL, unitToken = nm, soundFileName = PROBE_SOUND }) end
-    elseif IsInGroup() then
-        try("party1 token", { spellID = PROBE_SPELL, unitToken = "party1", soundFileName = PROBE_SOUND })
-    else
-        print("   |cffd9b34c(not in a group - only 'player' tested; join a raid for the real test)|r")
-    end
-    if UnitExists("nameplate1") then
-        try("nameplate1 token", { spellID = PROBE_SPELL, unitToken = "nameplate1", soundFileName = PROBE_SOUND })
-    end
-
-    -- fallback shapes
-    try("no unitToken (global backend)", { spellID = PROBE_SPELL, soundFileName = PROBE_SOUND })
-    try("player + soundKitID", { spellID = PROBE_SPELL, unitToken = "player", soundKitID = 8959 })
-
-    print("|cff888888If raidN is rejected but 'no unitToken' is accepted, use /has backend global.|r")
-end
-
--- ---------------------------------------------------------------------------
--- Phase test: can a channel be muted/unmuted mid-encounter? Arm it, pull a
--- boss, and it flips the channel's on/off CVar at set fight times, reporting
--- whether each change stuck. The channel is put back at encounter end (or as
--- soon as that's allowed, if the restore itself is blocked).
--- ---------------------------------------------------------------------------
-local ptest            -- armed test: { channel, offAt, onAt, start, orig }
-local ptRestore        -- pending restore: { cv, val }
-local function ptPrint(msg) print("|cff33ff99RAS phasetest|r " .. msg) end
-local function rName(t)
-    for k, v in pairs((Enum and Enum.AddOnRestrictionType) or {}) do if v == t then return k end end
-    return tostring(t)
-end
-local function ptState()
-    local r = {}
-    for t in pairs(_restrictions) do r[#r + 1] = rName(t) end
-    return "combat=" .. tostring(InCombatLockdown()) .. " restricted=" .. (#r > 0 and table.concat(r, ",") or "none")
-end
-local function ptSet(t, val, label)
-    local cv = CHANNEL_ON[t.channel]
-    local ok, err = pcall(SetCVar, cv, val)
-    local stuck = ok and GetCVar(cv) == val
-    ptPrint(("%s @ %.1fs: %s=%s %s  [%s]%s"):format(label, GetTime() - t.start, cv, val,
-        stuck and "|cff33ff99OK|r" or "|cffff4040FAILED|r", ptState(), ok and "" or ("  err: " .. tostring(err))))
-end
-
-function RAS:PhaseTestRestore()
-    local p = ptRestore; if not p then return end
-    if GetCVar(p.cv) ~= p.val then pcall(SetCVar, p.cv, p.val) end
-    if GetCVar(p.cv) == p.val then
-        ptRestore = nil; ptPrint("restored " .. p.cv .. "=" .. p.val)
-    else
-        ptPrint("|cffff4040couldn't restore " .. p.cv .. " yet|r, will retry after combat")
-    end
-end
-
-function RAS:PhaseTestArm(arg)
-    local a1, a2, a3 = (arg or ""):match("^(%S*)%s*(%S*)%s*(%S*)$")
-    if a1 and a1:lower() == "off" then ptest = nil; ptPrint("disarmed"); return end
-    local alias = { master = "Master", sfx = "SFX", effects = "SFX", music = "Music", ambience = "Ambience", dialog = "Dialog" }
-    local ch = (a1 and a1 ~= "") and alias[a1:lower()] or self:GetChannel()
-    local offAt, onAt = tonumber(a2) or 10, tonumber(a3) or 20
-    if not ch or onAt <= offAt then
-        print("RAS: /has phasetest [channel] [muteAtSec] [unmuteAtSec]   e.g. /has phasetest dialog 10 20   (/has phasetest off to cancel)")
-        return
-    end
-    ptest = { channel = ch, offAt = offAt, onAt = onAt }
-    ptPrint(("armed: next boss pull mutes %s at %ds, unmutes at %ds.  [%s]"):format(ch, offAt, onAt, ptState()))
-end
-
-function RAS:PhaseTestStart(encounterID, name, difficultyID, groupSize)
-    local t = ptest; if not t or t.start then return end
-    t.start = GetTime(); t.orig = GetCVar(CHANNEL_ON[t.channel])
-    ptPrint(("pull: %s  id=%s diff=%s size=%s  [%s]"):format(tostring(name), tostring(encounterID), tostring(difficultyID), tostring(groupSize), ptState()))
-    C_Timer.After(t.offAt, function() if ptest == t then ptSet(t, "0", "mute") end end)
-    C_Timer.After(t.onAt,  function() if ptest == t then ptSet(t, "1", "unmute") end end)
-end
-
-function RAS:PhaseTestEnd(success)
-    local t = ptest; if not t or not t.start then return end
-    ptest = nil
-    ptPrint(("encounter end after %.1fs (%s)  [%s]"):format(GetTime() - t.start, success == 1 and "kill" or "wipe", ptState()))
-    ptRestore = { cv = CHANNEL_ON[t.channel], val = t.orig }
-    self:PhaseTestRestore()
-    ptPrint("disarmed (re-arm with /has phasetest for another pull)")
-end
-
-function RAS:PhaseTestRestriction(rType, active)
-    if ptest and ptest.start then ptPrint(rName(rType) .. " restriction " .. (active and "ON" or "off")) end
 end
 
 -- ---------------------------------------------------------------------------
@@ -753,38 +582,7 @@ SlashCmdList.RAS = function(msg)
     msg = (msg or ""):gsub("^%s+", ""):gsub("%s+$", "")
     local cmd, arg = msg:match("^(%S*)%s*(.-)$")
     cmd = (cmd or ""):lower()
-    if cmd == "probe"     then RAS:Probe()
-    elseif cmd == "phasetest" then RAS:PhaseTestArm(arg)
-    elseif cmd == "rulelog" then RAS.db.rulesLog = not RAS.db.rulesLog; print("RAS rule log: " .. (RAS.db.rulesLog and "on" or "off"))
-    elseif cmd == "testfire" then
-        local a1, a2, a3 = arg:match("^(%S+)%s*(%S*)%s*(%S*)$")
-        local sound = a1 and RAS:ResolveSound(a1)
-        local spellID = tonumber(a2) or 1459
-        local token = (a3 ~= "" and a3) or "player"
-        if not sound then
-            print("RAS: /has testfire <file:Name | path> [spellID] [unitToken]   e.g. /has testfire file:breath 1459 raid6")
-        elseif not RAS:HasAPI() then
-            print("|cffff4040RAS:|r API missing")
-        elseif not canRegister() then
-            print("|cffff4040RAS:|r not safe right now (in combat / dead / restricted)")
-        elseif not UnitExists(token) then
-            print("|cffff4040RAS:|r no unit at '" .. token .. "'")
-        else
-            local opts = { spellID = spellID, unitToken = token }
-            if type(sound) == "number" then opts.soundKitID = sound else opts.soundFileName = sound end
-            opts.outputChannel = RAS.db.channel or "Master"
-            local ok, h = pcall(C_UnitAuras.AddAuraSound, (Enum and Enum.UnitAuraSoundTrigger and Enum.UnitAuraSoundTrigger.Added) or 0, opts)
-            if ok and h then
-                print("RAS testfire: " .. token .. " (" .. (UnitName(token) or "?") .. ") + spell " .. spellID
-                    .. " -> " .. tostring(sound) .. ". Apply that aura to them to hear it. Auto-clears in 25s.")
-                C_Timer.After(25, function()
-                    if C_UnitAuras.RemoveAuraSound then pcall(C_UnitAuras.RemoveAuraSound, h) end
-                    print("RAS testfire: cleared")
-                end)
-            else
-                print("|cffff4040RAS testfire rejected:|r " .. tostring(h))
-            end
-        end
+    if cmd == "rulelog" then RAS.db.rulesLog = not RAS.db.rulesLog; print("RAS rule log: " .. (RAS.db.rulesLog and "on" or "off"))
     elseif cmd == "addspell" then
         local id = tonumber(arg); local st, sn = RAS:Selected()
         if id then RAS:GroupTable(st, sn, true)[id] = true; RAS:Rebuild(); if RAS.RefreshUI then RAS:RefreshUI() end; print("RAS: added spell " .. id .. " to " .. st .. "/" .. sn)
@@ -847,14 +645,6 @@ SlashCmdList.RAS = function(msg)
     elseif cmd == "combatsafe" then
         RAS.db.combatSafe = (arg:lower() == "on")
         print("RAS combatSafe: " .. tostring(RAS.db.combatSafe))
-    elseif cmd == "api" then
-        print("|cff33ff99RAS|r C_UnitAuras sound functions:")
-        local any = false
-        for k in pairs(C_UnitAuras or {}) do
-            if type(k) == "string" and k:lower():find("sound") then print("   " .. k); any = true end
-        end
-        if not any then print("   (none found)") end
-        print("   remove resolved: " .. (RemoveAuraSound and "|cff33ff99yes|r" or "|cffff4040NO - rebuilds will stack!|r"))
     elseif cmd == "backend" then
         local b = arg:lower()
         if b == "unit" or b == "global" then
@@ -900,30 +690,21 @@ SlashCmdList.RAS = function(msg)
     elseif cmd == "" or cmd == "config" or cmd == "show" then
         if RAS.Toggle then RAS:Toggle() else RAS:PrintStatus() end
     else
-        print("|cff33ff99RAS|r  (blank = open UI) | addspell <id> | delspell <id> | spells | players | join <char> <raider> | roster | probe | phasetest [channel] [mute] [unmute] | rulelog | testfire <file:Name> [spellID] [unit] | api | channel <name> | backend unit/global | mode person/slot | rebuild | status | test <char> | combatsafe on/off")
+        print("|cff33ff99RAS|r  (blank = open UI) | addspell <id> | delspell <id> | spells | players | join <char> <raider> | roster | rulelog | channel <name> | backend unit/global | mode person/slot | rebuild | status | test <char> | combatsafe on/off")
     end
 end
 
 -- ---------------------------------------------------------------------------
 -- Events
 -- ---------------------------------------------------------------------------
--- Registration is combat-locked and ENCOUNTER_START fires with combat already
--- up, so we never register there. Instead we register during the out-of-combat
--- windows that always precede a pull: zoning in, leaving combat (after a wipe),
--- a pull countdown, and a ready check. Spells are a flat global list, so once
--- registered they cover whatever gets pulled; the first pull is covered by the
--- zone-in / ready-check registration.
+-- Registration is combat-locked, so it happens in the out-of-combat moments
+-- before a pull: zoning in, leaving combat, pull timer, ready check.
 -- ---------------------------------------------------------------------------
--- Defer registration one frame so the protected AddAuraSound call runs in a
--- clean (untainted) execution context instead of inside the event handler,
--- which can carry taint and get ADDON_ACTION_BLOCKED.
+-- 1s delay: runs outside the event handler (no taint), clears the combat-end
+-- window, and collapses bursts of GROUP_ROSTER_UPDATE into one rebuild
 function RAS:ScheduleRebuild()
     if self._scheduled then return end
     self._scheduled = true
-    -- settle delay: register a beat AFTER the triggering event so we're clear of
-    -- the combat-end / zone-in window where AddAuraSound can still be blocked
-    -- even though InCombatLockdown() already reports out of combat. The debounce
-    -- also collapses bursts of GROUP_ROSTER_UPDATE into a single rebuild.
     C_Timer.After(1, function() self._scheduled = nil; RAS:Rebuild() end)
 end
 
@@ -976,31 +757,23 @@ f:SetScript("OnEvent", function(_, event, ...)
         or event == "START_PLAYER_COUNTDOWN"   -- pull timer: register right before the pull
         or event == "READY_CHECK" then         -- common pre-pull signal
         if event == "PLAYER_LOGIN" then RAS:HookBossMods() end
-        RAS:PhaseTestRestore()
         RAS:RulesRestore()
         RAS:ScheduleRebuild()
 
     elseif event == "ENCOUNTER_START" then
-        RAS:PhaseTestStart(...)
         RAS:RulesStart(...)
     elseif event == "ENCOUNTER_END" then
-        RAS:PhaseTestEnd(select(5, ...))
         RAS:RulesEnd()
 
     elseif event == "ADDON_RESTRICTION_STATE_CHANGED" then
-        -- authoritative "protected calls (il)legal" signal; more reliable than
-        -- PLAYER_REGEN_ENABLED at the combat/encounter edge.
         local rType, rState = ...
         local T = Enum and Enum.AddOnRestrictionType
         local S = Enum and Enum.AddOnRestrictionState
         if T and S and (rType == T.Combat or rType == T.Encounter) then
             if rState == S.Active then
                 _restrictions[rType] = true
-                RAS:PhaseTestRestriction(rType, true)
             elseif rState == S.Inactive then
                 _restrictions[rType] = nil
-                RAS:PhaseTestRestriction(rType, false)
-                RAS:PhaseTestRestore()
                 RAS:RulesRestore()
                 if not restricted() then
                     RAS:ScheduleRebuild()   -- flush anything deferred while restricted

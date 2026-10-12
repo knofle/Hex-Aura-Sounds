@@ -254,8 +254,35 @@ local function showPicker(anchor, onPick)
     picker.catcher:Show(); picker:Show(); picker:Raise(); picker.search:SetFocus()
 end
 
--- tiny context menu at the cursor: items = { {text=, color=, onClick=}, ... }
-local menu
+-- tiny context menu at the cursor: items = { {text=, color=, onClick=, sub={items}}, ... }
+-- an item with sub opens a submenu to its right on hover
+local menu, submenu
+local MW, IH, PAD = 130, 20, 3
+local function fillMenu(m, items, onHover)
+    for _, b in ipairs(m.items) do b:Hide() end
+    for i, it in ipairs(items) do
+        local b = m.items[i]
+        if not b then
+            b = CreateFrame("Button", nil, m); b:RegisterForClicks("LeftButtonDown"); b:SetSize(MW - 2 * PAD, IH)
+            b.hl = b:CreateTexture(nil, "BACKGROUND"); b.hl:SetAllPoints(); b.hl:SetColorTexture(1, 1, 1, 0)
+            b.t = fs(b, 12, TEXT); b.t:SetPoint("LEFT", 8, 0)
+            b.arrow = b:CreateTexture(nil, "ARTWORK"); b.arrow:SetSize(10, 10); b.arrow:SetPoint("RIGHT", -4, 0)
+            b.arrow:SetTexture(ARROW); b.arrow:SetRotation(math.pi / 2); b.arrow:SetVertexColor(0.72, 0.75, 0.80)
+            b:SetScript("OnLeave", function() b.hl:SetColorTexture(1, 1, 1, 0) end)
+            m.items[i] = b
+        end
+        b:SetPoint("TOPLEFT", PAD, -PAD - (i - 1) * IH)
+        local c = it.color or TEXT; b.t:SetTextColor(c[1], c[2], c[3]); b.t:SetText(it.text)
+        b.arrow:SetShown(it.sub ~= nil)
+        b:SetScript("OnEnter", function() b.hl:SetColorTexture(1, 1, 1, 0.06); if onHover then onHover(b, it) end end)
+        b:SetScript("OnClick", function()
+            if it.sub then if onHover then onHover(b, it) end return end
+            menu:Hide(); if it.onClick then it.onClick() end
+        end)
+        b:Show()
+    end
+    m:SetSize(MW, PAD * 2 + #items * IH)
+end
 local function showMenu(items, anchor)
     if not menu then
         menu = CreateFrame("Frame", "HexAuraSoundsMenu", UIParent); menu:SetFrameStrata("FULLSCREEN_DIALOG")
@@ -264,27 +291,22 @@ local function showMenu(items, anchor)
         menu.catcher:RegisterForClicks("AnyDown")
         menu.catcher:SetScript("OnClick", function() menu:Hide() end)
         menu:SetFrameLevel(menu.catcher:GetFrameLevel() + 10)
-        menu:SetScript("OnHide", function() menu.catcher:Hide() end)
         menu.items = {}
+        submenu = CreateFrame("Frame", "HexAuraSoundsSubmenu", menu); submenu:SetFrameStrata("FULLSCREEN_DIALOG")
+        bg(submenu, 0.07, 0.075, 0.085, 0.99); stroke(submenu, GOLD, 1)
+        submenu:SetFrameLevel(menu:GetFrameLevel() + 10); submenu.items = {}; submenu:Hide()
+        menu:SetScript("OnHide", function() menu.catcher:Hide(); submenu:Hide() end)
     end
-    for _, b in ipairs(menu.items) do b:Hide() end
-    local MW, IH, PAD = 116, 20, 3
-    for i, it in ipairs(items) do
-        local b = menu.items[i]
-        if not b then
-            b = CreateFrame("Button", nil, menu); b:RegisterForClicks("LeftButtonDown"); b:SetSize(MW - 2 * PAD, IH)
-            b.hl = b:CreateTexture(nil, "BACKGROUND"); b.hl:SetAllPoints(); b.hl:SetColorTexture(1, 1, 1, 0)
-            b.t = fs(b, 12, TEXT); b.t:SetPoint("LEFT", 8, 0)
-            b:SetScript("OnEnter", function() b.hl:SetColorTexture(1, 1, 1, 0.06) end)
-            b:SetScript("OnLeave", function() b.hl:SetColorTexture(1, 1, 1, 0) end)
-            menu.items[i] = b
+    submenu:Hide()
+    fillMenu(menu, items, function(b, it)
+        if it.sub then
+            fillMenu(submenu, it.sub)
+            submenu:ClearAllPoints(); submenu:SetPoint("TOPLEFT", b, "TOPRIGHT", PAD + 1, PAD)
+            submenu:Show(); submenu:Raise()
+        else
+            submenu:Hide()
         end
-        b:SetPoint("TOPLEFT", PAD, -PAD - (i - 1) * IH)
-        local c = it.color or TEXT; b.t:SetTextColor(c[1], c[2], c[3]); b.t:SetText(it.text)
-        b:SetScript("OnClick", function() menu:Hide(); if it.onClick then it.onClick() end end)
-        b:Show()
-    end
-    menu:SetSize(MW, PAD * 2 + #items * IH)
+    end)
     if win then menu:SetScale(win:GetEffectiveScale() / UIParent:GetEffectiveScale()) end
     menu:ClearAllPoints()
     if anchor then menu:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
@@ -307,11 +329,11 @@ local function build()
     tinsert(UISpecialFrames, "HexAuraSoundsFrame")
 
     local title = fs(win, 15, GOLD); title:SetPoint("TOPLEFT", 16, -14); title:SetText("Hex Aura Sounds")
-    local close = softButton(win, "\195\151", 34, 34, function() win:Hide() end, MUTED); close:SetPoint("TOPRIGHT", -6, -6)
-    do local fp = close.t:GetFont(); if not close.t:SetFont(FONT, 28, "") then close.t:SetFont(fp, 28, "") end end
+    local close = softButton(win, "\195\151", 40, 40, function() win:Hide() end, MUTED); close:SetPoint("TOPRIGHT", -4, -4)
+    do local fp = close.t:GetFont(); if not close.t:SetFont(FONT, 38, "") then close.t:SetFont(fp, 38, "") end end
     local enLabel = fs(win, 12, MUTED); enLabel:SetText("Enabled")
     local sw = makeSwitch(win, function() return RAS.db.enabled end, function(v) RAS.db.enabled = v; RAS:Rebuild() end)
-    sw:SetPoint("TOPRIGHT", close, "TOPLEFT", -14, -9); enLabel:SetPoint("RIGHT", sw, "LEFT", -8, 0); win.sw = sw
+    sw:SetPoint("TOPRIGHT", close, "TOPLEFT", -12, -12); enLabel:SetPoint("RIGHT", sw, "LEFT", -8, 0); win.sw = sw
 
     -- output channel dropdown + that channel's WoW volume
     local CHANNELS = { { "Master", "Master" }, { "Music", "Music" }, { "Effects", "SFX" }, { "Ambience", "Ambience" }, { "Dialog", "Dialog" } }
@@ -383,16 +405,14 @@ local function build()
                 if btn == "RightButton" then
                     local id = c.data.id; local st, sn = RAS:Selected(); local dl = RAS:IsDelayed(st, sn, id)
                     local own = RAS.db.spellChannel[id]
+                    local chanItems = { { text = "Default (" .. chanLabel(RAS:GetChannel()) .. ")", color = own and TEXT or GOLD, onClick = function() RAS.db.spellChannel[id] = nil; RAS:Rebuild(); win:Refresh() end } }
+                    for _, ch in ipairs(CHANNELS) do
+                        local v = ch[2]
+                        chanItems[#chanItems + 1] = { text = ch[1], color = (own == v) and GOLD or TEXT, onClick = function() RAS.db.spellChannel[id] = v; RAS:Rebuild(); win:Refresh() end }
+                    end
                     showMenu({
                         { text = dl and "Undo Delay" or "Delay", color = GREEN, onClick = function() RAS:SetDelayed(st, sn, id, not dl); RAS:Rebuild(); win:Refresh() end },
-                        { text = "Channel: " .. (own and chanLabel(own) or "Default"), color = GOLD, onClick = function()
-                            local items = { { text = "Default (" .. chanLabel(RAS:GetChannel()) .. ")", color = own and TEXT or GOLD, onClick = function() RAS.db.spellChannel[id] = nil; RAS:Rebuild(); win:Refresh() end } }
-                            for _, ch in ipairs(CHANNELS) do
-                                local v = ch[2]
-                                items[#items + 1] = { text = ch[1], color = (own == v) and GOLD or TEXT, onClick = function() RAS.db.spellChannel[id] = v; RAS:Rebuild(); win:Refresh() end }
-                            end
-                            showMenu(items)
-                        end },
+                        { text = "Channel: " .. (own and chanLabel(own) or "Default"), color = GOLD, sub = chanItems },
                         { text = "Remove", color = RED, onClick = function() local g = selGroup(true); g[id] = nil; RAS:SetDelayed(st, sn, id, false); RAS:Rebuild(); win:Refresh() end },
                     })
                 else toggle() end
@@ -620,7 +640,8 @@ local function build()
     rw:SetMovable(true); rw:RegisterForDrag("LeftButton"); rw:SetScript("OnDragStart", rw.StartMoving); rw:SetScript("OnDragStop", rw.StopMovingOrSizing)
     bg(rw, 0.06, 0.065, 0.075, 0.99); stroke(rw, GOLD, 1); rw:Hide(); win.rulesWin = rw
     rw.title = fs(rw, 13, GOLD); rw.title:SetPoint("TOPLEFT", 12, -10)
-    local rclose = softButton(rw, "\195\151", 26, 26, function() rw:Hide() end, MUTED); rclose:SetPoint("TOPRIGHT", -4, -4)
+    local rclose = softButton(rw, "\195\151", 34, 34, function() rw:Hide() end, MUTED); rclose:SetPoint("TOPRIGHT", -2, -2)
+    do local fp = rclose.t:GetFont(); if not rclose.t:SetFont(FONT, 32, "") then rclose.t:SetFont(fp, 32, "") end end
     -- help lives in a hover tooltip on the "?" next to the close button
     local HELP_WINDOWS = {
         { "3:00-4:00",    "3 to 4 min into the fight" },
@@ -760,11 +781,12 @@ local function build()
     end
     function rw:Open(boss) self.boss = boss; self:Show(); self:Raise(); self:Refresh() end
 
+    -- light blue, on the "+ add" row
     local rulesBtn = softButton(win, "Boss rules", 100, 20, function()
         local _, sn = RAS:Selected()
         if rw:IsShown() and rw.boss == sn then rw:Hide() else rw:Open(sn) end
-    end)
-    rulesBtn:SetPoint("TOPRIGHT", -16, -44); win.rulesBtn = rulesBtn
+    end, { 0.45, 0.72, 1.0 })
+    rulesBtn:SetPoint("LEFT", addBtn, "RIGHT", 12, 0); win.rulesBtn = rulesBtn
 
     -- footer + scale ---------------------------------------------------------
     win.status = fs(win, 11, MUTED); win.status:SetPoint("BOTTOMLEFT", 16, 12)

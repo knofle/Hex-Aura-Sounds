@@ -256,7 +256,7 @@ end
 
 -- tiny context menu at the cursor: items = { {text=, color=, onClick=}, ... }
 local menu
-local function showMenu(items)
+local function showMenu(items, anchor)
     if not menu then
         menu = CreateFrame("Frame", "HexAuraSoundsMenu", UIParent); menu:SetFrameStrata("FULLSCREEN_DIALOG")
         bg(menu, 0.07, 0.075, 0.085, 0.99); stroke(menu, GOLD, 1)
@@ -286,8 +286,9 @@ local function showMenu(items)
     end
     menu:SetSize(MW, PAD * 2 + #items * IH)
     if win then menu:SetScale(win:GetEffectiveScale() / UIParent:GetEffectiveScale()) end
-    local scale = menu:GetEffectiveScale(); local cx, cy = GetCursorPosition()
-    menu:ClearAllPoints(); menu:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", cx / scale, cy / scale)
+    menu:ClearAllPoints()
+    if anchor then menu:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
+    else local scale = menu:GetEffectiveScale(); local cx, cy = GetCursorPosition(); menu:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", cx / scale, cy / scale) end
     menu.catcher:Show(); menu:Show(); menu:Raise()
 end
 
@@ -311,6 +312,48 @@ local function build()
     local enLabel = fs(win, 12, MUTED); enLabel:SetText("Enabled")
     local sw = makeSwitch(win, function() return RAS.db.enabled end, function(v) RAS.db.enabled = v; RAS:Rebuild() end)
     sw:SetPoint("TOPRIGHT", close, "TOPLEFT", -14, -9); enLabel:SetPoint("RIGHT", sw, "LEFT", -8, 0); win.sw = sw
+
+    -- output channel dropdown + that channel's WoW volume
+    local CHANNELS = { { "Master", "Master" }, { "Music", "Music" }, { "Effects", "SFX" }, { "Ambience", "Ambience" }, { "Dialog", "Dialog" } }
+    local function chanLabel(v) for _, c in ipairs(CHANNELS) do if c[2] == v then return c[1] end end return v end
+    local CHAN_TAG = { Master = "MST", Music = "MUS", SFX = "SFX", Ambience = "AMB", Dialog = "DLG" }
+    local volPct = fs(win, 11, MUTED); volPct:SetWidth(34); volPct:SetJustifyH("RIGHT")
+    local volSlider = makeMiniSlider(win, { width = 90, height = 14, thumbW = 30, min = 0, max = 1, step = 0.05,
+        get = function() return RAS:GetChannelVolume() end, format = function() return "" end,
+        onChange = function(v) RAS:SetChannelVolume(v); volPct:SetText(("%d%%"):format(math.floor(v * 100 + 0.5))) end })
+    volSlider:SetPoint("RIGHT", enLabel, "LEFT", -24, 0); volPct:SetPoint("RIGHT", volSlider, "LEFT", -6, 0)
+    local chanBtn = CreateFrame("Button", nil, win); chanBtn:SetSize(90, 20); bg(chanBtn, 0.095, 0.105, 0.12); stroke(chanBtn, HAIR, 1)
+    chanBtn:RegisterForClicks("LeftButtonDown")
+    chanBtn.t = fs(chanBtn, 12, TEXT); chanBtn.t:SetPoint("LEFT", 8, 0)
+    local car = chanBtn:CreateTexture(nil, "ARTWORK"); car:SetSize(12, 12); car:SetPoint("RIGHT", -6, 0); car:SetTexture(ARROW); car:SetVertexColor(0.72, 0.75, 0.80)
+    local chanTog = CreateFrame("Button", nil, win); chanTog:SetSize(34, 20); bg(chanTog, 0.095, 0.105, 0.12); stroke(chanTog, HAIR, 1)
+    chanTog:RegisterForClicks("LeftButtonDown")
+    chanTog.t = fs(chanTog, 11, GREEN); chanTog.t:SetPoint("CENTER")
+    chanTog:SetPoint("RIGHT", volPct, "LEFT", -8, 0)
+    chanTog:SetScript("OnClick", function()
+        if InCombatLockdown() then print("|cffe0544eRAS:|r can't change sound settings in combat."); return end
+        RAS:SetChannelEnabled(not RAS:GetChannelEnabled()); win:SyncChannel()
+    end)
+    chanBtn:SetPoint("RIGHT", chanTog, "LEFT", -2, 0); win.chanBtn = chanBtn
+    chanBtn:SetScript("OnClick", function()
+        local items = {}
+        for _, c in ipairs(CHANNELS) do
+            local v = c[2]
+            items[#items + 1] = { text = c[1], color = (v == RAS:GetChannel()) and GOLD or TEXT, onClick = function() RAS:SetChannel(v); win:Refresh() end }
+        end
+        showMenu(items, chanBtn)
+    end)
+    local chanLbl = fs(win, 12, MUTED); chanLbl:SetText("Output"); chanLbl:SetPoint("RIGHT", chanBtn, "LEFT", -6, 0)
+    function win:SyncChannel()
+        self.chanBtn.t:SetText(chanLabel(RAS:GetChannel())); volSlider:SyncValue()
+        volPct:SetText(("%d%%"):format(math.floor(RAS:GetChannelVolume() * 100 + 0.5)))
+        local on = RAS:GetChannelEnabled()
+        local c = on and GREEN or RED; chanTog.t:SetTextColor(c[1], c[2], c[3]); chanTog.t:SetText(on and "ON" or "OFF")
+        -- volume greyed and non-interactive while the channel is off
+        volSlider:SetAlpha(on and 1 or 0.35); volSlider:EnableMouse(on); volPct:SetAlpha(on and 1 or 0.35)
+    end
+    -- follow WoW's own audio panel live
+    win:RegisterEvent("CVAR_UPDATE"); win:SetScript("OnEvent", function() if win:IsShown() then win:SyncChannel() end end)
 
     -- SPELLS -----------------------------------------------------------------
     local sHead = fs(win, 11, GOLD); sHead:SetPoint("TOPLEFT", 16, -48); sHead:SetText("TRACKED SPELLS")
@@ -339,8 +382,17 @@ local function build()
                 if not c.data then return end
                 if btn == "RightButton" then
                     local id = c.data.id; local st, sn = RAS:Selected(); local dl = RAS:IsDelayed(st, sn, id)
+                    local own = RAS.db.spellChannel[id]
                     showMenu({
                         { text = dl and "Undo Delay" or "Delay", color = GREEN, onClick = function() RAS:SetDelayed(st, sn, id, not dl); RAS:Rebuild(); win:Refresh() end },
+                        { text = "Channel: " .. (own and chanLabel(own) or "Default"), color = GOLD, onClick = function()
+                            local items = { { text = "Default (" .. chanLabel(RAS:GetChannel()) .. ")", color = own and TEXT or GOLD, onClick = function() RAS.db.spellChannel[id] = nil; RAS:Rebuild(); win:Refresh() end } }
+                            for _, ch in ipairs(CHANNELS) do
+                                local v = ch[2]
+                                items[#items + 1] = { text = ch[1], color = (own == v) and GOLD or TEXT, onClick = function() RAS.db.spellChannel[id] = v; RAS:Rebuild(); win:Refresh() end }
+                            end
+                            showMenu(items)
+                        end },
                         { text = "Remove", color = RED, onClick = function() local g = selGroup(true); g[id] = nil; RAS:SetDelayed(st, sn, id, false); RAS:Rebuild(); win:Refresh() end },
                     })
                 else toggle() end
@@ -357,7 +409,8 @@ local function build()
             cell.icon.tex:SetTexture(tex); cell.icon.tex:SetDesaturated(not on)
             cell.name:SetText(trunc(nm, 18))
             cell.name:SetTextColor(on and TEXT[1] or MUTED[1], on and TEXT[2] or MUTED[2], on and TEXT[3] or MUTED[3])
-            cell.id:SetText(d.id)
+            local ch = RAS.db.spellChannel[d.id]
+            cell.id:SetText(ch and (d.id .. " |cffcca94d" .. (CHAN_TAG[ch] or ch) .. "|r") or d.id)
             cell.delayMark:SetShown(RAS:IsDelayed(st, sn, d.id))
             cell.tog:refresh()
         end)
@@ -377,7 +430,7 @@ local function build()
             local hov = b:CreateTexture(nil, "HIGHLIGHT"); hov:SetAllPoints(); hov:SetColorTexture(1, 1, 1, 0.05)
             b.t = fs(b, 12, GOLD); b.t:SetPoint("CENTER"); b.t:SetText(tlabels[tier]); b.tier = tier
             b.bar = b:CreateTexture(nil, "OVERLAY"); b.bar:SetPoint("BOTTOMLEFT", 1, 1); b.bar:SetPoint("BOTTOMRIGHT", -1, 1); b.bar:SetHeight(3); b.bar:SetColorTexture(GREEN[1], GREEN[2], GREEN[3], 0.95); b.bar:Hide()
-            b.gdot = b:CreateFontString(nil, "OVERLAY", "GameFontNormal"); b.gdot:SetFont(STANDARD_TEXT_FONT, 26, ""); b.gdot:SetTextColor(GREEN[1], GREEN[2], GREEN[3]); b.gdot:SetText("."); b.gdot:SetPoint("BOTTOMLEFT", b.t, "BOTTOMRIGHT", 3, 8); b.gdot:Hide()
+            b.gdot = b:CreateFontString(nil, "OVERLAY", "GameFontNormal"); b.gdot:SetFont(STANDARD_TEXT_FONT, 26, ""); b.gdot:SetTextColor(GREEN[1], GREEN[2], GREEN[3]); b.gdot:SetText("."); b.gdot:SetPoint("BOTTOMLEFT", b.t, "BOTTOMRIGHT", 3, 4); b.gdot:Hide()
             b:SetScript("OnClick", function() RAS.db.selTier = tier; win:Refresh() end)
             win.tier1[#win.tier1 + 1] = b; i = i + 1
         end
@@ -395,7 +448,10 @@ local function build()
             b.icon = b:CreateTexture(nil, "ARTWORK"); b.icon:SetSize(30, 30); b.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
             b.t = fs(b, 11, TEXT)
             b.bar = b:CreateTexture(nil, "OVERLAY"); b.bar:SetPoint("BOTTOMLEFT", 1, 1); b.bar:SetPoint("BOTTOMRIGHT", -1, 1); b.bar:SetHeight(3); b.bar:SetColorTexture(GREEN[1], GREEN[2], GREEN[3], 0.95); b.bar:Hide()
-            b.gdot = b:CreateFontString(nil, "OVERLAY", "GameFontNormal"); b.gdot:SetFont(STANDARD_TEXT_FONT, 26, ""); b.gdot:SetTextColor(GREEN[1], GREEN[2], GREEN[3]); b.gdot:SetText("."); b.gdot:SetPoint("BOTTOMLEFT", b.t, "BOTTOMRIGHT", 2, 8); b.gdot:Hide()
+            -- round dot, pinned to the button's top-right corner so it sits the same in every box
+            b.gdot = b:CreateTexture(nil, "OVERLAY"); b.gdot:SetSize(5, 5)
+            b.gdot:SetTexture("Interface\\CharacterFrame\\TempPortraitAlphaMask"); b.gdot:SetVertexColor(GREEN[1], GREEN[2], GREEN[3])
+            b.gdot:SetPoint("TOPRIGHT", -4, -4); b.gdot:Hide()
             b:SetScript("OnEnter", function() if b.fullname then GameTooltip:SetOwner(b, "ANCHOR_TOP"); GameTooltip:SetText(b.fullname, 1, 1, 1); GameTooltip:Show() end end)
             b:SetScript("OnLeave", function() GameTooltip:Hide() end)
             b:SetScript("OnClick", function() if b.name then RAS.db.selByTier = RAS.db.selByTier or {}; RAS.db.selByTier[RAS.db.selTier] = b.name; win:Refresh() end end)
@@ -405,10 +461,13 @@ local function build()
     end
     function win:LayoutTier2()
         local st = RAS:Selected(); local items = RAS:GroupItems(st); local n = #items
-        local bw = (n > 0) and (barW / n) or barW
+        -- whole-pixel widths so the text and dots don't land on half pixels;
+        -- the last button takes the leftover pixels
+        local bw = (n > 0) and math.floor(barW / n) or barW
         for _, b in ipairs(self.t2pool) do b:Hide() end
         for i, nm in ipairs(items) do
-            local b = getT2(i); b:SetSize(bw, 34); b:ClearAllPoints(); b:SetPoint("TOPLEFT", 16 + (i - 1) * bw, -218)
+            local w = (i == n) and (barW - (n - 1) * bw) or bw
+            local b = getT2(i); b:SetSize(w, 34); b:ClearAllPoints(); b:SetPoint("TOPLEFT", 16 + (i - 1) * bw, -218)
             b.name, b.tier, b.fullname = nm, st, nm
             b.gdot:SetShown(RAS:GroupHasEnabled(st, nm))
             if st == "custom" then
@@ -502,6 +561,211 @@ local function build()
     nameBox:SetScript("OnTextChanged", function(self2) self2.ph:SetShown(self2:GetText() == "" and not self2:HasFocus()); updateRemoveLabel() end)
     nameBox:SetScript("OnEnterPressed", function() saveJoin(); nameBox:ClearFocus() end)
 
+    -- CHANNEL RULES popup (per raid boss) -------------------------------------
+    local MAXR = 6
+    -- difficulty per rule (raid difficultyIDs; nil = all)
+    local DIFFS = { { "All", nil }, { "LFR", 17 }, { "Normal", 14 }, { "Heroic", 15 }, { "Mythic", 16 } }
+    local function diffLabel(v) for _, d in ipairs(DIFFS) do if d[2] == v then return d[1] end end return tostring(v) end
+    local MODES = { { "Mute during", "mute" }, { "Only during", "only" }, { "Volume during", "volume" } }
+    local function modeLabel(v) for _, m in ipairs(MODES) do if m[2] == (v or "mute") then return m[1] end end return "Mute during" end
+    local function fmtT(s) return ("%d:%02d"):format(math.floor(s / 60), s % 60) end
+    local function parseT(x)
+        local m, s = x:match("^(%d+):(%d%d)$"); if m then return tonumber(m) * 60 + tonumber(s) end
+        return tonumber(x)
+    end
+    -- "3:00-4:00" / "3:00-" -> from, to (nil = open end); nil if unreadable
+    local function parseRange(s)
+        s = s:gsub("%s+", "")
+        local a, b = s:match("^([%d:]+)%-([%d:]*)$")
+        local from = a and parseT(a)
+        local to = (b and b ~= "") and parseT(b) or nil
+        if not from or (b ~= "" and not to) or (to and to <= from) then return nil end
+        return from, to
+    end
+    -- "3:00-4:00, 5:00-, p2, p1.5, p2 0:05-0:20" -> windows list, or nil + the bad piece
+    local function parseWindows(txt)
+        local out = {}
+        for tok in (txt or ""):gmatch("[^,]+") do
+            tok = tok:lower():match("^%s*(.-)%s*$")
+            if tok ~= "" then
+                local p, rest = tok:match("^ph?a?s?e?%s*(%d+%.?%d*)%s*(.*)$")
+                if p and not tok:match("^%d") then
+                    local w = { stage = tonumber(p) }
+                    if rest ~= "" then
+                        w.from, w.to = parseRange(rest)
+                        if not w.from then return nil, tok end
+                    end
+                    out[#out + 1] = w
+                else
+                    local from, to = parseRange(tok)
+                    if not from then return nil, tok end
+                    out[#out + 1] = { from = from, to = to }
+                end
+            end
+        end
+        return out
+    end
+    local function formatWindows(ws)
+        local t = {}
+        for _, w in ipairs(ws or {}) do
+            local range = w.from and (fmtT(w.from) .. "-" .. (w.to and fmtT(w.to) or ""))
+            if w.stage then t[#t + 1] = "p" .. w.stage .. (range and (" " .. range) or "")
+            else t[#t + 1] = range end
+        end
+        return table.concat(t, ", ")
+    end
+
+    local rw = CreateFrame("Frame", "HexAuraSoundsRules", win); rw:SetSize(560, 44 + MAXR * 26 + 40)
+    rw:SetPoint("CENTER"); rw:SetFrameStrata("DIALOG"); rw:EnableMouse(true)
+    rw:SetMovable(true); rw:RegisterForDrag("LeftButton"); rw:SetScript("OnDragStart", rw.StartMoving); rw:SetScript("OnDragStop", rw.StopMovingOrSizing)
+    bg(rw, 0.06, 0.065, 0.075, 0.99); stroke(rw, GOLD, 1); rw:Hide(); win.rulesWin = rw
+    rw.title = fs(rw, 13, GOLD); rw.title:SetPoint("TOPLEFT", 12, -10)
+    local rclose = softButton(rw, "\195\151", 26, 26, function() rw:Hide() end, MUTED); rclose:SetPoint("TOPRIGHT", -4, -4)
+    -- help lives in a hover tooltip on the "?" next to the close button
+    local HELP_WINDOWS = {
+        { "3:00-4:00",    "3 to 4 min into the fight" },
+        { "3:00-",        "from 3 min until the end" },
+        { "p2",           "all of phase 2  (p1.5 = intermission)" },
+        { "p2 0:05-0:20", "5 to 20 sec into phase 2" },
+        { "p2 0:05-",     "from 5 sec into phase 2 until it ends" },
+    }
+    local HELP_MODES = {
+        { "Mute during", "channel on, off inside the windows" },
+        { "Only during", "channel off, on inside the windows" },
+        { "Volume during", "channel volume set to the % inside the windows" },
+        { " ", "(overlapping volume rules: lowest % wins)" },
+    }
+    local rhelp = softButton(rw, "?", 26, 26, nil, MUTED); rhelp:SetPoint("RIGHT", rclose, "LEFT", -2, 0)
+    rhelp:HookScript("OnEnter", function()
+        GameTooltip:SetOwner(rhelp, "ANCHOR_RIGHT")
+        GameTooltip:AddLine("Windows  (separate with commas)", GOLD[1], GOLD[2], GOLD[3])
+        for _, it in ipairs(HELP_WINDOWS) do GameTooltip:AddDoubleLine(it[1], it[2], 1, 1, 1, MUTED[1] + 0.3, MUTED[2] + 0.3, MUTED[3] + 0.3) end
+        GameTooltip:AddLine("Phase windows (p2 ...) need BigWigs or DBM installed.", GREEN[1], GREEN[2], GREEN[3])
+        GameTooltip:AddLine("Without one, only fight-time windows work.", GREEN[1], GREEN[2], GREEN[3])
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Modes", GOLD[1], GOLD[2], GOLD[3])
+        for _, it in ipairs(HELP_MODES) do GameTooltip:AddDoubleLine(it[1], it[2], 1, 1, 1, MUTED[1] + 0.3, MUTED[2] + 0.3, MUTED[3] + 0.3) end
+        GameTooltip:AddLine(" ")
+        GameTooltip:AddLine("Master mutes ALL game sound; use Dialog, Ambience or Music.", RED[1], RED[2], RED[3])
+        GameTooltip:Show()
+    end)
+    rhelp:HookScript("OnLeave", function() GameTooltip:Hide() end)
+    local function rulesList(create)
+        local r = RAS.db.rules
+        if create and not r[rw.boss] then r[rw.boss] = {} end
+        return r[rw.boss]
+    end
+    rw.rows = {}
+    for i = 1, MAXR do
+        local row = CreateFrame("Frame", nil, rw); row:SetSize(536, 22); row:SetPoint("TOPLEFT", 12, -44 - (i - 1) * 26)
+        row.chan = CreateFrame("Button", nil, row); row.chan:SetSize(84, 20); bg(row.chan, 0.095, 0.105, 0.12); stroke(row.chan, HAIR, 1)
+        row.chan:RegisterForClicks("LeftButtonDown"); row.chan:SetPoint("LEFT", 0, 0)
+        row.chan.t = fs(row.chan, 12, TEXT); row.chan.t:SetPoint("LEFT", 8, 0)
+        local a = row.chan:CreateTexture(nil, "ARTWORK"); a:SetSize(12, 12); a:SetPoint("RIGHT", -6, 0); a:SetTexture(ARROW); a:SetVertexColor(0.72, 0.75, 0.80)
+        row.chan:SetScript("OnClick", function()
+            local items = {}
+            for _, c in ipairs(CHANNELS) do
+                local v = c[2]
+                items[#items + 1] = { text = c[1], color = (row.rule and row.rule.channel == v) and GOLD or TEXT, onClick = function() if row.rule then row.rule.channel = v; rw:Refresh() end end }
+            end
+            showMenu(items, row.chan)
+        end)
+        row.diff = CreateFrame("Button", nil, row); row.diff:SetSize(70, 20); bg(row.diff, 0.095, 0.105, 0.12); stroke(row.diff, HAIR, 1)
+        row.diff:RegisterForClicks("LeftButtonDown"); row.diff:SetPoint("LEFT", row.chan, "RIGHT", 6, 0)
+        row.diff.t = fs(row.diff, 12, TEXT); row.diff.t:SetPoint("LEFT", 8, 0)
+        local da = row.diff:CreateTexture(nil, "ARTWORK"); da:SetSize(12, 12); da:SetPoint("RIGHT", -6, 0); da:SetTexture(ARROW); da:SetVertexColor(0.72, 0.75, 0.80)
+        row.diff:SetScript("OnClick", function()
+            local items = {}
+            for _, d in ipairs(DIFFS) do
+                local v = d[2]
+                items[#items + 1] = { text = d[1], color = (row.rule and row.rule.diff == v) and GOLD or TEXT, onClick = function() if row.rule then row.rule.diff = v; rw:Refresh() end end }
+            end
+            showMenu(items, row.diff)
+        end)
+        -- mode dropdown: Mute during / Only during / Volume during
+        row.mode = CreateFrame("Button", nil, row); row.mode:SetSize(110, 20); bg(row.mode, 0.095, 0.105, 0.12); stroke(row.mode, HAIR, 1)
+        row.mode:RegisterForClicks("LeftButtonDown"); row.mode:SetPoint("LEFT", row.diff, "RIGHT", 6, 0)
+        row.mode.t = fs(row.mode, 12, TEXT); row.mode.t:SetPoint("LEFT", 8, 0)
+        local ma = row.mode:CreateTexture(nil, "ARTWORK"); ma:SetSize(12, 12); ma:SetPoint("RIGHT", -6, 0); ma:SetTexture(ARROW); ma:SetVertexColor(0.72, 0.75, 0.80)
+        row.mode:SetScript("OnClick", function()
+            local items = {}
+            for _, m in ipairs(MODES) do
+                local v = m[2]
+                items[#items + 1] = { text = m[1], color = (row.rule and (row.rule.mode or "mute") == v) and GOLD or TEXT, onClick = function()
+                    if not row.rule then return end
+                    row.rule.mode = v
+                    if v == "volume" and not row.rule.vol then row.rule.vol = 0 end
+                    rw:Refresh()
+                end }
+            end
+            showMenu(items, row.mode)
+        end)
+        -- volume % (only shown in Volume during mode)
+        row.vol = makeEdit(row, 44, "%"); row.vol:SetPoint("LEFT", row.mode, "RIGHT", 6, 0)
+        row.vol:SetScript("OnEnterPressed", function() row.vol:ClearFocus() end)
+        row.vol:HookScript("OnEditFocusLost", function()
+            if not row.rule then return end
+            local n = tonumber((row.vol:GetText():gsub("[%%%s]", "")))
+            if n then row.rule.vol = math.max(0, math.min(100, math.floor(n + 0.5))) / 100 end
+            row.vol:SetText(("%d%%"):format(math.floor((row.rule.vol or 0) * 100 + 0.5)))
+        end)
+        -- hover: the channel's current (normal) volume, for reference
+        row.vol:SetScript("OnEnter", function()
+            if not row.rule then return end
+            GameTooltip:SetOwner(row.vol, "ANCHOR_TOP")
+            GameTooltip:AddLine("Volume inside the windows", GOLD[1], GOLD[2], GOLD[3])
+            GameTooltip:AddLine(("Current %s volume: %d%%"):format(chanLabel(row.rule.channel), math.floor(RAS:GetChannelVolume(row.rule.channel) * 100 + 0.5)), 1, 1, 1)
+            GameTooltip:Show()
+        end)
+        row.vol:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        row.win = makeEdit(row, 226, "e.g. 3:00-4:00, p2")
+        local function commit()
+            if not row.rule then return end
+            local ws, bad = parseWindows(row.win:GetText())
+            if ws then row.rule.windows = ws; row.win:SetTextColor(0.9, 0.9, 0.92); row.win:SetText(formatWindows(ws))
+            else row.win:SetTextColor(RED[1], RED[2], RED[3]); print("|cffe0544eRAS:|r can't read window '" .. tostring(bad) .. "'  (use 3:00-4:00, 3:00- or p2)") end
+        end
+        row.win:SetScript("OnEnterPressed", function() row.win:ClearFocus() end)   -- focus loss commits
+        row.win:HookScript("OnEditFocusLost", commit)
+        row.del = softButton(row, "\195\151", 22, 20, function() local l = rulesList(false); if l and row.idx then table.remove(l, row.idx); rw:Refresh() end end, RED)
+        row.del:SetPoint("LEFT", row.win, "RIGHT", 6, 0)
+        rw.rows[i] = row
+    end
+    rw.add = softButton(rw, "+ add rule", 90, 20, function()
+        local l = rulesList(true); if #l >= MAXR then return end
+        l[#l + 1] = { channel = "Dialog", mode = "mute", windows = {} }; rw:Refresh()
+    end)
+    rw.add:SetPoint("BOTTOMLEFT", 8, 10)
+    rw.src = fs(rw, 10, MUTED); rw.src:SetPoint("BOTTOMRIGHT", -12, 15)
+    function rw:Refresh()
+        local l = rulesList(false) or {}
+        self.title:SetText("Channel rules:  " .. self.boss .. "  |cff6b737f(id " .. tostring(RAS.encounterIDs[self.boss]) .. ")|r")
+        for i, row in ipairs(self.rows) do
+            local r = l[i]; row.rule, row.idx = r, i
+            if r then
+                row.chan.t:SetText(chanLabel(r.channel)); row.diff.t:SetText(diffLabel(r.diff))
+                row.mode.t:SetText(modeLabel(r.mode))
+                -- volume box squeezes in before the windows box in Volume mode
+                local isVol = r.mode == "volume"
+                row.vol:SetShown(isVol)
+                if isVol and not row.vol:HasFocus() then row.vol:SetText(("%d%%"):format(math.floor((r.vol or 0) * 100 + 0.5))) end
+                row.win:ClearAllPoints(); row.win:SetPoint("LEFT", isVol and row.vol or row.mode, "RIGHT", 6, 0); row.win:SetWidth(isVol and 176 or 226)
+                if not row.win:HasFocus() then row.win:SetTextColor(0.9, 0.9, 0.92); row.win:SetText(formatWindows(r.windows)) end
+                row:Show()
+            else row:Hide() end
+        end
+        self.add:SetShown(#l < MAXR)
+        self.src:SetText("Phases from: " .. (RAS.phaseSource or "no boss mod found (time windows only)"))
+        win:Refresh()   -- rules count on the button
+    end
+    function rw:Open(boss) self.boss = boss; self:Show(); self:Raise(); self:Refresh() end
+
+    local rulesBtn = softButton(win, "Boss rules", 100, 20, function()
+        local _, sn = RAS:Selected()
+        if rw:IsShown() and rw.boss == sn then rw:Hide() else rw:Open(sn) end
+    end)
+    rulesBtn:SetPoint("TOPRIGHT", -16, -44); win.rulesBtn = rulesBtn
+
     -- footer + scale ---------------------------------------------------------
     win.status = fs(win, 11, MUTED); win.status:SetPoint("BOTTOMLEFT", 16, 12)
     local function applyScaleKeepTopLeft(v)
@@ -517,10 +781,17 @@ local function build()
     scaleSlider:SetPoint("BOTTOMRIGHT", -14, 10); scaleLbl:SetPoint("RIGHT", scaleSlider, "LEFT", -6, 0); win.scaleSlider = scaleSlider
 
     function win:Refresh()
-        self.sw:refresh(); if self.scaleSlider then self.scaleSlider:SyncValue() end
+        self.sw:refresh(); if self.scaleSlider then self.scaleSlider:SyncValue() end; self:SyncChannel()
         -- spell selection + tier highlight
         local st, sn = RAS:Selected()
         self.spellSub:SetText(sn ~= "" and sn or "")
+        -- channel rules: raid bosses with an encounter ID only
+        local ruled = st == "raid" and RAS.encounterIDs ~= nil and RAS.encounterIDs[sn] ~= nil
+        local rl = RAS.db.rules[sn]
+        self.rulesBtn:SetShown(ruled); self.rulesBtn.t:SetText((rl and #rl > 0) and ("Boss rules (" .. #rl .. ")") or "Boss rules")
+        if self.rulesWin:IsShown() and self.rulesWin.boss ~= sn then
+            if ruled then self.rulesWin:Open(sn) else self.rulesWin:Hide() end
+        end
         for _, b in ipairs(self.tier1 or {}) do local seld = b.tier == st; b.selbg:SetShown(seld); b.bar:SetShown(seld); b.gdot:SetShown(RAS:TierHasEnabled(b.tier)) end
         self:LayoutTier2()
         for _, b in ipairs(self.t2pool or {}) do local seld = b:IsShown() and b.name == sn; b.selbg:SetShown(seld); b.bar:SetShown(seld) end

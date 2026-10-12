@@ -42,6 +42,10 @@ local defaults = {
     globalSound      = nil,    -- fallback sound for the global backend
     mode             = "person", -- "person" (sound follows the raider) or "slot" (pinned to raidN)
     slotSound        = {},     -- [slotIndex] = sound value, used only in slot mode
+    spellChannel     = {},     -- [spellID] = output channel override (nil = main channel)
+    rules            = {},     -- rules[bossName] = { {channel=, mode="mute"|"only", windows={...}}, ... }
+    rulesRestore     = {},     -- [cvar] = value to put back after a ruled encounter
+    rulesLog         = true,   -- print channel changes made by rules
 }
 
 -- ---------------------------------------------------------------------------
@@ -54,8 +58,8 @@ local defaults = {
 --   C_UnitAuras.RemoveAuraSound(handle)
 --
 -- THREE things this build assumes and the probe (/has probe) exists to prove:
---   1. AddAuraSound accepts raid1..raidN / partyN unit tokens (GAST only
---      confirmed player/target/focus/boss1-8; rejected plain names).
+--   1. AddAuraSound accepts raid1..raidN / partyN unit tokens (only
+--      player/target/focus/boss1-8 were confirmed; plain names are rejected).
 --   2. The remove function is named RemoveAuraSound.
 --   3. Whether the API is combat-locked like the 12.0 private-aura sound APIs.
 --      If the probe shows it is NOT combat-locked, flip /has combatsafe on and
@@ -86,6 +90,42 @@ function RAS:ResolveSound(value)
         return SOUND_DIR .. value:sub(6) .. ".ogg"
     end
     return value
+end
+
+-- ---------------------------------------------------------------------------
+-- Output channel + that channel's WoW volume CVar (mirrors the audio panel)
+-- ---------------------------------------------------------------------------
+local CHANNEL_VOL = {
+    Master = "Sound_MasterVolume", SFX = "Sound_SFXVolume", Music = "Sound_MusicVolume",
+    Ambience = "Sound_AmbienceVolume", Dialog = "Sound_DialogVolume",
+}
+function RAS:GetChannel() return (self.db and self.db.channel) or "Master" end
+function RAS:SetChannel(c)
+    if not CHANNEL_VOL[c] or c == self:GetChannel() then return end
+    self.db.channel = c; self:Rebuild()   -- re-register through the new channel
+end
+function RAS:GetChannelVolume(ch)
+    local cv = CHANNEL_VOL[ch or self:GetChannel()]
+    return tonumber(cv and GetCVar(cv)) or 1
+end
+function RAS:SetChannelVolume(v)
+    local cv = CHANNEL_VOL[self:GetChannel()]
+    if cv then SetCVar(cv, tostring(math.max(0, math.min(1, v or 0)))) end
+end
+-- channel on/off switch CVars; Master's switch is the global "all sound" one
+local CHANNEL_ON = {
+    Master = "Sound_EnableAllSound", SFX = "Sound_EnableSFX", Music = "Sound_EnableMusic",
+    Ambience = "Sound_EnableAmbience", Dialog = "Sound_EnableDialog",
+}
+-- folds in the master switch, since a channel is only audible when master is on
+function RAS:GetChannelEnabled()
+    local function on(cv) local v = GetCVar(cv); return v ~= nil and v ~= "0" end
+    local c = self:GetChannel()
+    return on("Sound_EnableAllSound") and (c == "Master" or on(CHANNEL_ON[c]))
+end
+function RAS:SetChannelEnabled(v)
+    local cv = CHANNEL_ON[self:GetChannel()]
+    if cv then SetCVar(cv, v and "1" or "0") end
 end
 
 -- the raider a character is assigned to: saved override first, else raiders.lua seed
@@ -151,13 +191,20 @@ local function clearRegistrations()
 end
 RAS.ClearRegistrations = clearRegistrations
 
+-- per-spell output channel (set in the UI), else the main Output channel
+local function spellChannel(spellID)
+    local db = RAS.db
+    return (db and db.spellChannel and db.spellChannel[spellID]) or (db and db.channel) or "Master"
+end
+RAS.SpellChannel = spellChannel
+
 local function registerOne(spellID, token, sound, alsoRemoved)
     if not AddAuraSound then return false end
     local opts = { spellID = spellID }
     if token then opts.unitToken = token end
     if type(sound) == "number" then opts.soundKitID = sound
     else opts.soundFileName = sound end
-    opts.outputChannel = (RAS.db and RAS.db.channel) or "Master"
+    opts.outputChannel = spellChannel(spellID)
 
     local ok, handle = pcall(AddAuraSound, TRIGGER_ADDED, opts)
     if not (ok and handle) and opts.outputChannel then
@@ -345,7 +392,7 @@ function RAS:Rebuild()
             local sound = self:ResolveSound(delayedSet[s] and delaySound(base) or base)
             if sound then
                 desired[#desired + 1] = { s = s, token = nil, sound = sound }
-                sigparts[#sigparts + 1] = s .. "|*|" .. tostring(sound)
+                sigparts[#sigparts + 1] = s .. "|*|" .. tostring(sound) .. "|" .. spellChannel(s)
             else
                 missing = missing + 1
             end
@@ -364,7 +411,7 @@ function RAS:Rebuild()
                     local sound = self:ResolveSound(delayedSet[s] and delaySound(base) or base)
                     if sound then
                         desired[#desired + 1] = { s = s, token = token, sound = sound }
-                        sigparts[#sigparts + 1] = s .. "|" .. token .. "|" .. tostring(sound)
+                        sigparts[#sigparts + 1] = s .. "|" .. token .. "|" .. tostring(sound) .. "|" .. spellChannel(s)
                     end
                 end
             else
@@ -377,7 +424,7 @@ function RAS:Rebuild()
     -- This kills redundant re-registration from frequent GROUP_ROSTER_UPDATE etc.,
     -- so there are far fewer protected calls that could hit an unsafe window.
     table.sort(sigparts)
-    local sig = table.concat(sigparts, ";")
+    local sig = (self.db.channel or "Master") .. "#" .. table.concat(sigparts, ";")   -- channel change must re-register
     if sig == self._lastSig then
         self.lastMissing = missing
         if self.RefreshUI then self:RefreshUI() end
@@ -458,6 +505,220 @@ function RAS:Probe()
 end
 
 -- ---------------------------------------------------------------------------
+-- Phase test: can a channel be muted/unmuted mid-encounter? Arm it, pull a
+-- boss, and it flips the channel's on/off CVar at set fight times, reporting
+-- whether each change stuck. The channel is put back at encounter end (or as
+-- soon as that's allowed, if the restore itself is blocked).
+-- ---------------------------------------------------------------------------
+local ptest            -- armed test: { channel, offAt, onAt, start, orig }
+local ptRestore        -- pending restore: { cv, val }
+local function ptPrint(msg) print("|cff33ff99RAS phasetest|r " .. msg) end
+local function rName(t)
+    for k, v in pairs((Enum and Enum.AddOnRestrictionType) or {}) do if v == t then return k end end
+    return tostring(t)
+end
+local function ptState()
+    local r = {}
+    for t in pairs(_restrictions) do r[#r + 1] = rName(t) end
+    return "combat=" .. tostring(InCombatLockdown()) .. " restricted=" .. (#r > 0 and table.concat(r, ",") or "none")
+end
+local function ptSet(t, val, label)
+    local cv = CHANNEL_ON[t.channel]
+    local ok, err = pcall(SetCVar, cv, val)
+    local stuck = ok and GetCVar(cv) == val
+    ptPrint(("%s @ %.1fs: %s=%s %s  [%s]%s"):format(label, GetTime() - t.start, cv, val,
+        stuck and "|cff33ff99OK|r" or "|cffff4040FAILED|r", ptState(), ok and "" or ("  err: " .. tostring(err))))
+end
+
+function RAS:PhaseTestRestore()
+    local p = ptRestore; if not p then return end
+    if GetCVar(p.cv) ~= p.val then pcall(SetCVar, p.cv, p.val) end
+    if GetCVar(p.cv) == p.val then
+        ptRestore = nil; ptPrint("restored " .. p.cv .. "=" .. p.val)
+    else
+        ptPrint("|cffff4040couldn't restore " .. p.cv .. " yet|r, will retry after combat")
+    end
+end
+
+function RAS:PhaseTestArm(arg)
+    local a1, a2, a3 = (arg or ""):match("^(%S*)%s*(%S*)%s*(%S*)$")
+    if a1 and a1:lower() == "off" then ptest = nil; ptPrint("disarmed"); return end
+    local alias = { master = "Master", sfx = "SFX", effects = "SFX", music = "Music", ambience = "Ambience", dialog = "Dialog" }
+    local ch = (a1 and a1 ~= "") and alias[a1:lower()] or self:GetChannel()
+    local offAt, onAt = tonumber(a2) or 10, tonumber(a3) or 20
+    if not ch or onAt <= offAt then
+        print("RAS: /has phasetest [channel] [muteAtSec] [unmuteAtSec]   e.g. /has phasetest dialog 10 20   (/has phasetest off to cancel)")
+        return
+    end
+    ptest = { channel = ch, offAt = offAt, onAt = onAt }
+    ptPrint(("armed: next boss pull mutes %s at %ds, unmutes at %ds.  [%s]"):format(ch, offAt, onAt, ptState()))
+end
+
+function RAS:PhaseTestStart(encounterID, name, difficultyID, groupSize)
+    local t = ptest; if not t or t.start then return end
+    t.start = GetTime(); t.orig = GetCVar(CHANNEL_ON[t.channel])
+    ptPrint(("pull: %s  id=%s diff=%s size=%s  [%s]"):format(tostring(name), tostring(encounterID), tostring(difficultyID), tostring(groupSize), ptState()))
+    C_Timer.After(t.offAt, function() if ptest == t then ptSet(t, "0", "mute") end end)
+    C_Timer.After(t.onAt,  function() if ptest == t then ptSet(t, "1", "unmute") end end)
+end
+
+function RAS:PhaseTestEnd(success)
+    local t = ptest; if not t or not t.start then return end
+    ptest = nil
+    ptPrint(("encounter end after %.1fs (%s)  [%s]"):format(GetTime() - t.start, success == 1 and "kill" or "wipe", ptState()))
+    ptRestore = { cv = CHANNEL_ON[t.channel], val = t.orig }
+    self:PhaseTestRestore()
+    ptPrint("disarmed (re-arm with /has phasetest for another pull)")
+end
+
+function RAS:PhaseTestRestriction(rType, active)
+    if ptest and ptest.start then ptPrint(rName(rType) .. " restriction " .. (active and "ON" or "off")) end
+end
+
+-- ---------------------------------------------------------------------------
+-- Channel rules: per boss, mute a channel during windows ("mute") or keep it
+-- off except during windows ("only"), or set its volume during windows
+-- ("volume", rule.vol 0-1; lowest wins on overlap). A window is a fight-time range
+-- { from=sec, to=sec|nil } or a boss-mod phase { stage=n } (from BigWigs/DBM),
+-- optionally timed from the phase start { stage=n, from=sec, to=sec|nil }.
+-- A rule can be limited to one difficulty (rule.diff = difficultyID).
+-- Evaluated on a short ticker while a ruled encounter is active; the original
+-- channel switches / volumes are saved and put back afterwards (also after a /reload).
+-- ---------------------------------------------------------------------------
+local enc   -- active ruled encounter: { boss, start, stage, rules, applied, ticker }
+
+function RAS:BossForEncounter(id)
+    for name, eid in pairs(RAS.encounterIDs or {}) do if eid == id then return name end end
+end
+
+local function rulesLog(msg) if RAS.db.rulesLog then print("|cff33ff99RAS rules|r " .. msg) end end
+local function fmtClock(s) s = math.max(0, math.floor(s)); return ("%d:%02d"):format(math.floor(s / 60), s % 60) end
+-- CVar values match (volumes may read back as "0.400000" for "0.4")
+local function sameCV(a, b)
+    if a == b then return true end
+    local x, y = tonumber(a), tonumber(b)
+    return x ~= nil and y ~= nil and math.abs(x - y) < 0.001
+end
+
+local function windowActive(w, t, stage, stageT)
+    if w.stage then
+        if stage ~= w.stage then return false end
+        if not w.from then return true end
+        t = stageT   -- timed window inside the phase
+    end
+    return t >= (w.from or 0) and (w.to == nil or t < w.to)
+end
+
+local function rulesEval()
+    if not enc then return end
+    local now = GetTime()
+    local t, stageT = now - enc.start, now - enc.stageStart
+    -- per channel: on if inside ANY "only" window (or there are no "only" rules),
+    -- and off inside any "mute" window (mute wins)
+    local hasOnly, inOnly, inMute = {}, {}, {}
+    local volHas, volMin = {}, {}   -- volume CVars with a rule / lowest active volume
+    for _, r in ipairs(enc.rules) do
+        local cv = CHANNEL_ON[r.channel]
+        if cv then
+            local inside = false
+            for _, w in ipairs(r.windows or {}) do if windowActive(w, t, enc.stage, stageT) then inside = true break end end
+            if r.mode == "volume" then
+                local vcv = CHANNEL_VOL[r.channel]
+                volHas[vcv] = true
+                if inside and r.vol then volMin[vcv] = math.min(volMin[vcv] or 1, r.vol) end
+            elseif r.mode == "only" then
+                hasOnly[cv] = true
+                if inside then inOnly[cv] = true end
+            else
+                inMute[cv] = inMute[cv] or inside
+            end
+        end
+    end
+    -- volume: the rule's % inside a window, the saved normal volume outside
+    for vcv in pairs(volHas) do
+        local target = volMin[vcv] and tostring(volMin[vcv]) or RAS.db.rulesRestore[vcv]
+        if target and enc.applied[vcv] ~= target then
+            if not sameCV(GetCVar(vcv), target) then pcall(SetCVar, vcv, target) end
+            if sameCV(GetCVar(vcv), target) then
+                enc.applied[vcv] = target
+                local nm = vcv:gsub("^Sound_", ""):gsub("Volume$", "")
+                rulesLog(("%s volume %d%% @ %s (phase %s)"):format(nm, math.floor(tonumber(target) * 100 + 0.5), fmtClock(t), tostring(enc.stage)))
+            end   -- if blocked, the next tick retries
+        end
+    end
+    local want = {}
+    for cv in pairs(hasOnly) do want[cv] = true end
+    for cv in pairs(inMute) do want[cv] = true end
+    for cv in pairs(want) do want[cv] = (not hasOnly[cv] or inOnly[cv] == true) and not inMute[cv] end
+    for cv, on in pairs(want) do
+        local v = on and "1" or "0"
+        if enc.applied[cv] ~= v then
+            if GetCVar(cv) ~= v then pcall(SetCVar, cv, v) end
+            if GetCVar(cv) == v then
+                enc.applied[cv] = v
+                rulesLog(("%s %s @ %s (phase %s)"):format(cv:gsub("^Sound_Enable", ""), on and "|cff33ff99on|r" or "|cffff4040off|r", fmtClock(t), tostring(enc.stage)))
+            end   -- if blocked, the next tick retries
+        end
+    end
+end
+
+function RAS:RulesRestore()
+    if enc then return end
+    local r = self.db and self.db.rulesRestore; if not r or not next(r) then return end
+    for cv, val in pairs(r) do
+        if not sameCV(GetCVar(cv), val) then pcall(SetCVar, cv, val) end
+        if sameCV(GetCVar(cv), val) then r[cv] = nil end
+    end
+end
+
+function RAS:RulesStart(encounterID, _, difficultyID)
+    if enc then self:RulesEnd() end
+    local boss = self:BossForEncounter(encounterID)
+    -- only the rules for this difficulty (rule.diff = difficultyID, nil = all)
+    local rules = {}
+    for _, r in ipairs((boss and self.db.rules[boss]) or {}) do
+        if not r.diff or r.diff == difficultyID then rules[#rules + 1] = r end
+    end
+    if #rules == 0 then return end
+    enc = { boss = boss, start = GetTime(), stage = 1, rules = rules, applied = {} }
+    enc.stageStart = enc.start
+    -- remember the switches / volumes as they were (keep an older value if a restore is still pending)
+    for _, r in ipairs(rules) do
+        local cv = (r.mode == "volume" and CHANNEL_VOL or CHANNEL_ON)[r.channel]
+        if cv and self.db.rulesRestore[cv] == nil then self.db.rulesRestore[cv] = GetCVar(cv) end
+    end
+    rulesLog(boss .. ": " .. #rules .. " rule(s) active" .. (self.phaseSource and (", phases via " .. self.phaseSource) or ", no boss mod for phases"))
+    rulesEval()
+    enc.ticker = C_Timer.NewTicker(0.2, rulesEval)
+end
+
+function RAS:RulesEnd()
+    if not enc then return end
+    if enc.ticker then enc.ticker:Cancel() end
+    enc = nil
+    self:RulesRestore()
+end
+
+function RAS:OnBossModStage(stage)
+    stage = tonumber(stage)
+    if enc and stage and stage ~= enc.stage then enc.stage = stage; enc.stageStart = GetTime(); rulesEval() end
+end
+
+-- follow BigWigs / DBM phase changes (their loaders are present at login)
+function RAS:HookBossMods()
+    if self._bmHooked then return end
+    self._bmHooked = true
+    if BigWigsLoader and BigWigsLoader.RegisterMessage then
+        local ok = pcall(BigWigsLoader.RegisterMessage, RAS, "BigWigs_SetStage", function(_, _, stage) RAS:OnBossModStage(stage) end)
+        if ok then self.phaseSource = "BigWigs" end
+    end
+    if DBM and DBM.RegisterCallback then
+        local ok = pcall(DBM.RegisterCallback, DBM, "DBM_SetStage", function(_, _, _, stage) RAS:OnBossModStage(stage) end)
+        if ok then self.phaseSource = self.phaseSource and (self.phaseSource .. " + DBM") or "DBM" end
+    end
+end
+
+-- ---------------------------------------------------------------------------
 -- Local test playback (does a raider's file resolve and play on YOUR client?)
 -- ---------------------------------------------------------------------------
 function RAS:TestPlay(name)
@@ -493,6 +754,8 @@ SlashCmdList.RAS = function(msg)
     local cmd, arg = msg:match("^(%S*)%s*(.-)$")
     cmd = (cmd or ""):lower()
     if cmd == "probe"     then RAS:Probe()
+    elseif cmd == "phasetest" then RAS:PhaseTestArm(arg)
+    elseif cmd == "rulelog" then RAS.db.rulesLog = not RAS.db.rulesLog; print("RAS rule log: " .. (RAS.db.rulesLog and "on" or "off"))
     elseif cmd == "testfire" then
         local a1, a2, a3 = arg:match("^(%S+)%s*(%S*)%s*(%S*)$")
         local sound = a1 and RAS:ResolveSound(a1)
@@ -637,7 +900,7 @@ SlashCmdList.RAS = function(msg)
     elseif cmd == "" or cmd == "config" or cmd == "show" then
         if RAS.Toggle then RAS:Toggle() else RAS:PrintStatus() end
     else
-        print("|cff33ff99RAS|r  (blank = open UI) | addspell <id> | delspell <id> | spells | players | join <char> <raider> | roster | probe | testfire <file:Name> [spellID] [unit] | api | channel <name> | backend unit/global | mode person/slot | rebuild | status | test <char> | combatsafe on/off")
+        print("|cff33ff99RAS|r  (blank = open UI) | addspell <id> | delspell <id> | spells | players | join <char> <raider> | roster | probe | phasetest [channel] [mute] [unmute] | rulelog | testfire <file:Name> [spellID] [unit] | api | channel <name> | backend unit/global | mode person/slot | rebuild | status | test <char> | combatsafe on/off")
     end
 end
 
@@ -653,7 +916,7 @@ end
 -- ---------------------------------------------------------------------------
 -- Defer registration one frame so the protected AddAuraSound call runs in a
 -- clean (untainted) execution context instead of inside the event handler,
--- which can carry taint and get ADDON_ACTION_BLOCKED. (Same pattern as CCS.)
+-- which can carry taint and get ADDON_ACTION_BLOCKED.
 function RAS:ScheduleRebuild()
     if self._scheduled then return end
     self._scheduled = true
@@ -674,6 +937,8 @@ f:RegisterEvent("PLAYER_UNGHOST")
 f:RegisterEvent("PLAYER_ALIVE")
 f:RegisterEvent("START_PLAYER_COUNTDOWN")
 f:RegisterEvent("READY_CHECK")
+f:RegisterEvent("ENCOUNTER_START")
+f:RegisterEvent("ENCOUNTER_END")
 if Enum and Enum.AddOnRestrictionType then f:RegisterEvent("ADDON_RESTRICTION_STATE_CHANGED") end
 
 f:SetScript("OnEvent", function(_, event, ...)
@@ -710,7 +975,17 @@ f:SetScript("OnEvent", function(_, event, ...)
         or event == "PLAYER_UNGHOST" or event == "PLAYER_ALIVE"  -- resurrected / released
         or event == "START_PLAYER_COUNTDOWN"   -- pull timer: register right before the pull
         or event == "READY_CHECK" then         -- common pre-pull signal
+        if event == "PLAYER_LOGIN" then RAS:HookBossMods() end
+        RAS:PhaseTestRestore()
+        RAS:RulesRestore()
         RAS:ScheduleRebuild()
+
+    elseif event == "ENCOUNTER_START" then
+        RAS:PhaseTestStart(...)
+        RAS:RulesStart(...)
+    elseif event == "ENCOUNTER_END" then
+        RAS:PhaseTestEnd(select(5, ...))
+        RAS:RulesEnd()
 
     elseif event == "ADDON_RESTRICTION_STATE_CHANGED" then
         -- authoritative "protected calls (il)legal" signal; more reliable than
@@ -721,8 +996,12 @@ f:SetScript("OnEvent", function(_, event, ...)
         if T and S and (rType == T.Combat or rType == T.Encounter) then
             if rState == S.Active then
                 _restrictions[rType] = true
+                RAS:PhaseTestRestriction(rType, true)
             elseif rState == S.Inactive then
                 _restrictions[rType] = nil
+                RAS:PhaseTestRestriction(rType, false)
+                RAS:PhaseTestRestore()
+                RAS:RulesRestore()
                 if not restricted() then
                     RAS:ScheduleRebuild()   -- flush anything deferred while restricted
                 end

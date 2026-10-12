@@ -24,6 +24,7 @@ RAS.raid = {
     "The Coiled Altar",
     "Ula'Tek",
     "Nymrissa Wavecaller",
+    "Kith'ix",
 }
 
 RAS.mplus = {
@@ -36,6 +37,21 @@ RAS.mplus = {
     "Ruby Life Pools",
     "King's Rest",
     -- add the rest of the dungeons...
+}
+
+-- Encounter IDs (as sent by ENCOUNTER_START), keyed by exact boss name. A boss
+-- needs one here to get the per-boss channel rules (the "rules" button).
+RAS.encounterIDs = {
+    ["Nek'zali the Soulcoiler"] = 3470,
+    ["Entombed Sentinels"] = 3445,
+    ["The Lost Explorers"] = 3497,
+    ["Vashnik the Malignant"] = 3455,
+    ["SSZorak"] = 3420,
+    ["The Twin Fangs"] = 3421,
+    ["The Coiled Altar"] = 3429,
+    ["Ula'Tek"] = 3492,
+    ["Nymrissa Wavecaller"] = 3379,
+    ["Kith'ix"] = 3513,   -- PTR
 }
 
 -- Optional icons, keyed by exact boss/dungeon name. Values are in-game icon

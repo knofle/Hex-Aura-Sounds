@@ -42,7 +42,9 @@ local defaults = {
     globalSound      = nil,    -- fallback sound for the global backend
     mode             = "person", -- "person" (sound follows the raider) or "slot" (pinned to raidN)
     slotSound        = {},     -- [slotIndex] = sound value, used only in slot mode
-    spellChannel     = {},     -- [spellID] = output channel override (nil = main channel)
+    spellChannel     = {},     -- [entry] = output channel override (nil = main channel)
+    spellPlayers     = {},     -- [entry] = { mode = "only"|"except"|nil, raiders = { [raider]=true } }
+    spellSound       = {},     -- [entry] = SharedMedia sound name, played instead of the raider sound
     rules            = {},     -- rules[bossName] = { {channel=, mode="mute"|"only", windows={...}}, ... }
     rulesRestore     = {},     -- [cvar] = value to put back after a ruled encounter
     rulesLog         = true,   -- print channel changes made by rules
@@ -126,6 +128,39 @@ function RAS:IsSeeded(charName)
     return charName ~= nil and RAS.charSeed ~= nil and RAS.charSeed[charName] ~= nil
 end
 
+-- ---------------------------------------------------------------------------
+-- Spell sounds: a SharedMedia sound per spell entry, played instead of the
+-- raider sound. Add the spell twice (one with a sound, one delayed) to hear
+-- "<spell> <name>". Needs LibSharedMedia-3.0, loaded by any other addon.
+-- ---------------------------------------------------------------------------
+local function LSM() return LibStub and LibStub("LibSharedMedia-3.0", true) end
+
+function RAS:SpellSoundList()
+    local lsm = LSM(); if not lsm then return nil end
+    local l = {}
+    for _, nm in ipairs(lsm:List("sound")) do if nm ~= "None" then l[#l + 1] = nm end end
+    return l
+end
+
+function RAS:SpellSoundPath(name)
+    local lsm = LSM()
+    return name and lsm and lsm:Fetch("sound", name, true) or nil
+end
+
+function RAS:PreviewSpellSound(name)
+    local path = self:SpellSoundPath(name)
+    if path then PlaySoundFile(path, self:GetChannel()) end
+end
+
+-- per-spell raider filter: "only" = just the listed raiders, "except" = everyone but them
+function RAS:SpellAllows(spellID, raider)
+    local sp = self.db.spellPlayers and self.db.spellPlayers[spellID]
+    if not sp or not sp.mode then return true end
+    local listed = raider ~= nil and sp.raiders and sp.raiders[raider] or false
+    if sp.mode == "only" then return listed and true or false end
+    return not listed
+end
+
 -- resolve a character to its sound value ("file:<sound>") via its raider
 function RAS:CharSound(charName)
     local raider = self:CharRaider(charName)
@@ -177,20 +212,36 @@ local function clearRegistrations()
     end
 end
 
--- per-spell output channel (set in the UI), else the main Output channel
-local function spellChannel(spellID)
+-- Spell entries: a group can hold the same spell more than once. The first is
+-- keyed by the spellID (number), extra copies by "spellID:n" (string). All
+-- per-spell settings (channel, players, sound, delay) are keyed by the entry.
+local function entrySpell(key) return tonumber(key) or tonumber(tostring(key):match("^(%d+)")) end
+RAS.EntrySpell = entrySpell
+function RAS.EntryIndex(key) return tonumber(tostring(key):match(":(%d+)$")) or 1 end
+
+-- a free entry key for spellID in group g (the plain ID if it isn't used yet)
+function RAS:NewEntryKey(g, spellID)
+    if g[spellID] == nil then return spellID end
+    local n = 2
+    while g[spellID .. ":" .. n] ~= nil do n = n + 1 end
+    return spellID .. ":" .. n
+end
+
+-- per-entry output channel (set in the UI), else the main Output channel
+local function spellChannel(key)
     local db = RAS.db
-    return (db and db.spellChannel and db.spellChannel[spellID]) or (db and db.channel) or "Master"
+    return (db and db.spellChannel and db.spellChannel[key]) or (db and db.channel) or "Master"
 end
 RAS.SpellChannel = spellChannel
 
-local function registerOne(spellID, token, sound, alsoRemoved)
+-- isFile: a number is a FileDataID (SharedMedia), not a sound kit
+local function registerOne(spellID, token, sound, alsoRemoved, isFile, channel)
     if not AddAuraSound then return false end
     local opts = { spellID = spellID }
     if token then opts.unitToken = token end
-    if type(sound) == "number" then opts.soundKitID = sound
+    if type(sound) == "number" and not isFile then opts.soundKitID = sound
     else opts.soundFileName = sound end
-    opts.outputChannel = spellChannel(spellID)
+    opts.outputChannel = channel or spellChannel(spellID)
 
     local ok, handle = pcall(AddAuraSound, TRIGGER_ADDED, opts)
     if not (ok and handle) and opts.outputChannel then
@@ -245,7 +296,14 @@ end
 function RAS:GroupTracked(tier, name)
     local t, l = self:GroupTable(tier, name, false), {}
     if t then for s in pairs(t) do l[#l + 1] = s end end
-    table.sort(l); return l
+    table.sort(l, RAS.EntryLess); return l
+end
+
+-- sort entries by spellID, then copy number (keys mix numbers and strings)
+function RAS.EntryLess(a, b)
+    local sa, sb = entrySpell(a), entrySpell(b)
+    if sa ~= sb then return sa < sb end
+    return RAS.EntryIndex(a) < RAS.EntryIndex(b)
 end
 
 -- does this group have at least one ENABLED (toggled-on) spell?
@@ -285,7 +343,7 @@ local function allEnabled(self)
             for s, on in pairs(spells) do if on and not seen[s] then seen[s] = true; l[#l + 1] = s end end
         end
     end
-    table.sort(l); return l
+    table.sort(l, RAS.EntryLess); return l
 end
 RAS.AllEnabledSpells = allEnabled
 
@@ -346,14 +404,14 @@ function RAS:Rebuild()
         return v   -- can't d-prefix a raw path or numeric ID
     end
 
-    -- 1) build the DESIRED registration set (no API calls yet)
+    -- 1) build the DESIRED registration set (no API calls yet); s = entry key
     local desired, sigparts, missing = {}, {}, 0
     if self.db.backend == "global" then
         for _, s in ipairs(spells) do
-            local base = (RAS.spellSounds and RAS.spellSounds[s]) or self.db.globalSound
+            local base = (RAS.spellSounds and RAS.spellSounds[entrySpell(s)]) or self.db.globalSound
             local sound = self:ResolveSound(delayedSet[s] and delaySound(base) or base)
             if sound then
-                desired[#desired + 1] = { s = s, token = nil, sound = sound }
+                desired[#desired + 1] = { s = entrySpell(s), token = nil, sound = sound, ch = spellChannel(s) }
                 sigparts[#sigparts + 1] = s .. "|*|" .. tostring(sound) .. "|" .. spellChannel(s)
             else
                 missing = missing + 1
@@ -369,11 +427,16 @@ function RAS:Rebuild()
                 base = self:CharSound(name)
             end
             if base then
+                local raider = self:CharRaider(name)
                 for _, s in ipairs(spells) do
-                    local sound = self:ResolveSound(delayedSet[s] and delaySound(base) or base)
-                    if sound then
-                        desired[#desired + 1] = { s = s, token = token, sound = sound }
-                        sigparts[#sigparts + 1] = s .. "|" .. token .. "|" .. tostring(sound) .. "|" .. spellChannel(s)
+                    if self:SpellAllows(s, raider) then
+                        -- an entry with its own SharedMedia sound plays that INSTEAD of the raider sound
+                        local own = self:SpellSoundPath(self.db.spellSound[s])
+                        local sound = own or self:ResolveSound(delayedSet[s] and delaySound(base) or base)
+                        if sound then
+                            desired[#desired + 1] = { s = entrySpell(s), token = token, sound = sound, file = own ~= nil, ch = spellChannel(s) }
+                            sigparts[#sigparts + 1] = s .. "|" .. token .. "|" .. tostring(sound) .. "|" .. spellChannel(s)
+                        end
                     end
                 end
             else
@@ -395,7 +458,7 @@ function RAS:Rebuild()
     clearRegistrations()
     local count, blocked = 0, false
     for _, d in ipairs(desired) do
-        if registerOne(d.s, d.token, d.sound, self.db.playRemoved) then count = count + 1 else blocked = true end
+        if registerOne(d.s, d.token, d.sound, self.db.playRemoved, d.file, d.ch) then count = count + 1 else blocked = true end
     end
     -- only cache the signature on a clean apply, so a blocked attempt re-tries next time
     self._lastSig = blocked and nil or sig
@@ -585,7 +648,7 @@ SlashCmdList.RAS = function(msg)
     if cmd == "rulelog" then RAS.db.rulesLog = not RAS.db.rulesLog; print("RAS rule log: " .. (RAS.db.rulesLog and "on" or "off"))
     elseif cmd == "addspell" then
         local id = tonumber(arg); local st, sn = RAS:Selected()
-        if id then RAS:GroupTable(st, sn, true)[id] = true; RAS:Rebuild(); if RAS.RefreshUI then RAS:RefreshUI() end; print("RAS: added spell " .. id .. " to " .. st .. "/" .. sn)
+        if id then local g = RAS:GroupTable(st, sn, true); g[RAS:NewEntryKey(g, id)] = true; RAS:Rebuild(); if RAS.RefreshUI then RAS:RefreshUI() end; print("RAS: added spell " .. id .. " to " .. st .. "/" .. sn)
         else print("RAS: /has addspell <spellID>  (adds to the selected group)") end
     elseif cmd == "delspell" then
         local id = tonumber(arg); local st, sn = RAS:Selected(); local g = RAS:GroupTable(st, sn, false)
@@ -595,7 +658,7 @@ SlashCmdList.RAS = function(msg)
         local st, sn = RAS:Selected(); local t = RAS:GroupTracked(st, sn)
         print("|cff33ff99RAS spells|r " .. st .. "/" .. sn .. " (" .. #t .. "):")
         for _, s in ipairs(t) do
-            local nm = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(s)) or "?"
+            local nm = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(entrySpell(s))) or "?"
             print("   " .. s .. "  " .. nm)
         end
     elseif cmd == "join" then

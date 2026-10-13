@@ -11,6 +11,7 @@ local HAIR  = {0.16, 0.17, 0.20}
 local PANEL = {0.075, 0.082, 0.095}
 local GREEN = {0.30, 0.80, 0.46}
 local RED   = {0.85, 0.34, 0.31}
+local BLUE  = {0.45, 0.72, 1.00}
 
 local function bg(f, r, g, b, a)
     local t = f:CreateTexture(nil, "BACKGROUND"); t:SetAllPoints(); t:SetColorTexture(r, g, b, a or 1); f.bg = t; return t
@@ -212,7 +213,7 @@ local picker
 local openCharPicker
 local function buildPicker()
     picker = CreateFrame("Frame", "HexAuraSoundsPicker", UIParent)
-    picker:SetSize(180, 278); picker:SetFrameStrata("FULLSCREEN_DIALOG")
+    picker:SetSize(260, 278); picker:SetFrameStrata("FULLSCREEN_DIALOG")
     bg(picker, 0.06, 0.065, 0.075, 0.99); stroke(picker, GOLD, 1)
     picker.catcher = CreateFrame("Button", nil, UIParent); picker.catcher:SetAllPoints(UIParent); picker.catcher:SetFrameStrata("FULLSCREEN_DIALOG"); picker.catcher:Hide()
     picker.catcher:RegisterForClicks("AnyDown")
@@ -225,39 +226,57 @@ local function buildPicker()
     picker:SetFrameLevel(picker.catcher:GetFrameLevel() + 10)
     picker:SetScript("OnHide", function() picker.catcher:Hide(); picker.search:ClearFocus(); if RAS.SetPickerChar then RAS:SetPickerChar(nil) end end)
 
-    picker.search = makeEdit(picker, 172, "search"); picker.search:SetPoint("TOPLEFT", 4, -4)
+    picker.search = makeEdit(picker, 252, "search"); picker.search:SetPoint("TOPLEFT", 4, -4)
     picker.search:SetScript("OnTextChanged", function(self2) self2.ph:SetShown(self2:GetText() == "" and not self2:HasFocus()); picker:Populate() end)
     picker.search:SetScript("OnEscapePressed", function() picker:Hide() end)
-    picker.search:SetScript("OnEnterPressed", function() local d = picker.list.data and picker.list.data[1]; if d and picker.onPick then picker.onPick(d.name) end picker:Hide() end)
+    picker.search:SetScript("OnEnterPressed", function() local d = picker.list.data and picker.list.data[1]; if d and picker.onPick then picker.onPick(d.name, d.none) end picker:Hide() end)
 
-    picker.list = scroll(picker, 172, 244, 20,
+    picker.list = scroll(picker, 252, 244, 20,
         function(sf)
-            local r = CreateFrame("Button", nil, sf); r:RegisterForClicks("LeftButtonDown"); r.name = fs(r, 12, TEXT); r.name:SetPoint("LEFT", 8, 0)
+            local r = CreateFrame("Button", nil, sf); r:RegisterForClicks("LeftButtonDown")
+            r.name = fs(r, 12, TEXT); r.name:SetPoint("LEFT", 8, 0); r.name:SetPoint("RIGHT", -22, 0); r.name:SetJustifyH("LEFT"); r.name:SetWordWrap(false)
+            r.play = iconButton(r, SPEAKER, 14, function() if r.data and picker.preview then picker.preview(r.data.name) end end); r.play:SetPoint("RIGHT", -4, 0)
             r:SetScript("OnEnter", function() r.hl:SetColorTexture(1, 1, 1, 0.06) end)
             r:SetScript("OnLeave", function() r.hl:SetColorTexture(1, 1, 1, 0) end)
-            r:SetScript("OnClick", function() if r.data and picker.onPick then picker.onPick(r.data.name) end picker:Hide() end)
+            r:SetScript("OnClick", function() if r.data and picker.onPick then picker.onPick(r.data.name, r.data.none) end picker:Hide() end)
             return r
         end,
-        function(row, d) row.name:SetText(d.name) end)
+        function(row, d)
+            row.name:SetText(d.name); row.name:SetTextColor(d.none and MUTED[1] or TEXT[1], d.none and MUTED[2] or TEXT[2], d.none and MUTED[3] or TEXT[3])
+            row.play:SetShown(picker.preview ~= nil and not d.none)
+        end)
     picker.list:SetPoint("TOPLEFT", 4, -28)
+    -- source: list of names (default: raiders); none: optional "clear" entry on top
     function picker:Populate()
         local q = self.search:GetText():lower(); local data = {}
-        for _, name in ipairs(RAS.playerOrder) do if q == "" or name:lower():find(q, 1, true) then data[#data + 1] = { name = name } end end
+        if self.none and q == "" then data[1] = { name = self.none, none = true } end
+        for _, name in ipairs(self.source or RAS.playerOrder) do if q == "" or name:lower():find(q, 1, true) then data[#data + 1] = { name = name } end end
         self.list:SetData(data)
     end
 end
-local function showPicker(anchor, onPick)
+-- opts (optional): { source = {names}, preview = function(name), none = "label",
+--   attached = true: opens to the right of anchor as part of a menu (the menu
+--   handles outside clicks and closes it) }
+local function showPicker(anchor, onPick, opts)
     if not picker then buildPicker() end
+    opts = opts or {}
+    picker.source, picker.preview, picker.none, picker.attached = opts.source, opts.preview, opts.none, opts.attached
     picker.onPick = onPick; picker.search:SetText(""); picker:Populate()
     if win then picker:SetScale(win:GetEffectiveScale() / UIParent:GetEffectiveScale()) end
-    picker:ClearAllPoints(); picker:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
-    picker.catcher:Show(); picker:Show(); picker:Raise(); picker.search:SetFocus()
+    picker:ClearAllPoints()
+    if opts.attached then
+        picker:SetPoint("TOPLEFT", anchor, "TOPRIGHT", 4, 3)
+        picker.catcher:Hide(); picker:Show(); picker:Raise()
+    else
+        picker:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -2)
+        picker.catcher:Show(); picker:Show(); picker:Raise(); picker.search:SetFocus()
+    end
 end
 
--- tiny context menu at the cursor: items = { {text=, color=, onClick=, sub={items}}, ... }
--- an item with sub opens a submenu to its right on hover
+-- tiny context menu at the cursor: items = { {text=, color=, onClick=, sub={items}, open=function(btn)}, ... }
+-- an item with sub opens a submenu to its right on hover; open() does the same with a custom frame
 local menu, submenu
-local MW, IH, PAD = 130, 20, 3
+local MW, IH, PAD = 130, 20, 3   -- MW = minimum width; menus grow to fit their longest item
 local function fillMenu(m, items, onHover)
     for _, b in ipairs(m.items) do b:Hide() end
     for i, it in ipairs(items) do
@@ -268,20 +287,30 @@ local function fillMenu(m, items, onHover)
             b.t = fs(b, 12, TEXT); b.t:SetPoint("LEFT", 8, 0)
             b.arrow = b:CreateTexture(nil, "ARTWORK"); b.arrow:SetSize(10, 10); b.arrow:SetPoint("RIGHT", -4, 0)
             b.arrow:SetTexture(ARROW); b.arrow:SetRotation(math.pi / 2); b.arrow:SetVertexColor(0.72, 0.75, 0.80)
-            b:SetScript("OnLeave", function() b.hl:SetColorTexture(1, 1, 1, 0) end)
+            b:SetScript("OnLeave", function() b.hl:SetColorTexture(1, 1, 1, 0); GameTooltip:Hide() end)
             m.items[i] = b
         end
         b:SetPoint("TOPLEFT", PAD, -PAD - (i - 1) * IH)
-        local c = it.color or TEXT; b.t:SetTextColor(c[1], c[2], c[3]); b.t:SetText(it.text)
-        b.arrow:SetShown(it.sub ~= nil)
-        b:SetScript("OnEnter", function() b.hl:SetColorTexture(1, 1, 1, 0.06); if onHover then onHover(b, it) end end)
+        -- disabled items are greyed out and can't be clicked; tip explains why
+        local c = it.disabled and MUTED or it.color or TEXT; b.t:SetTextColor(c[1], c[2], c[3]); b.t:SetText(it.text)
+        b.arrow:SetShown(it.sub ~= nil or it.open ~= nil)
+        b:SetScript("OnEnter", function()
+            if not it.disabled then b.hl:SetColorTexture(1, 1, 1, 0.06) end
+            if it.tip then GameTooltip:SetOwner(b, "ANCHOR_RIGHT"); GameTooltip:SetText(it.tip, 1, 1, 1, 1, true); GameTooltip:Show() end
+            if onHover then onHover(b, it) end
+        end)
         b:SetScript("OnClick", function()
-            if it.sub then if onHover then onHover(b, it) end return end
+            if it.disabled then return end
+            if it.sub or it.open then if onHover then onHover(b, it) end return end
             menu:Hide(); if it.onClick then it.onClick() end
         end)
         b:Show()
     end
-    m:SetSize(MW, PAD * 2 + #items * IH)
+    -- width: fit the longest item (text + room for the arrow)
+    local w = MW
+    for i = 1, #items do w = math.max(w, math.ceil(m.items[i].t:GetStringWidth()) + 8 + 22 + 2 * PAD) end
+    for i = 1, #items do m.items[i]:SetWidth(w - 2 * PAD) end
+    m:SetSize(w, PAD * 2 + #items * IH)
 end
 local function showMenu(items, anchor)
     if not menu then
@@ -295,16 +324,25 @@ local function showMenu(items, anchor)
         submenu = CreateFrame("Frame", "HexAuraSoundsSubmenu", menu); submenu:SetFrameStrata("FULLSCREEN_DIALOG")
         bg(submenu, 0.07, 0.075, 0.085, 0.99); stroke(submenu, GOLD, 1)
         submenu:SetFrameLevel(menu:GetFrameLevel() + 10); submenu.items = {}; submenu:Hide()
-        menu:SetScript("OnHide", function() menu.catcher:Hide(); submenu:Hide() end)
+        menu:SetScript("OnHide", function()
+            menu.catcher:Hide(); submenu:Hide()
+            if picker and picker.attached then picker:Hide() end
+        end)
     end
     submenu:Hide()
     fillMenu(menu, items, function(b, it)
+        local attachedOpen = picker and picker.attached and picker:IsShown()
         if it.sub then
+            if attachedOpen then picker:Hide() end
             fillMenu(submenu, it.sub)
             submenu:ClearAllPoints(); submenu:SetPoint("TOPLEFT", b, "TOPRIGHT", PAD + 1, PAD)
             submenu:Show(); submenu:Raise()
+        elseif it.open and not it.disabled then
+            submenu:Hide()
+            if not (attachedOpen and picker.openedBy == b) then it.open(b); if picker then picker.openedBy = b end end
         else
             submenu:Hide()
+            if attachedOpen then picker:Hide() end
         end
     end)
     if win then menu:SetScale(win:GetEffectiveScale() / UIParent:GetEffectiveScale()) end
@@ -339,6 +377,13 @@ local function build()
     local CHANNELS = { { "Master", "Master" }, { "Music", "Music" }, { "Effects", "SFX" }, { "Ambience", "Ambience" }, { "Dialog", "Dialog" } }
     local function chanLabel(v) for _, c in ipairs(CHANNELS) do if c[2] == v then return c[1] end end return v end
     local CHAN_TAG = { Master = "MST", Music = "MUS", SFX = "SFX", Ambience = "AMB", Dialog = "DLG" }
+    -- per-spell raider filter, as shown in menus/tooltips: "Everyone", "Only 3", "Except 2"
+    local function playersSummary(id)
+        local sp = RAS.db.spellPlayers[id]
+        if not sp or not sp.mode then return "Everyone" end
+        local n = 0; for _ in pairs(sp.raiders or {}) do n = n + 1 end
+        return (sp.mode == "only" and "Only " or "Except ") .. n
+    end
     local volPct = fs(win, 11, MUTED); volPct:SetWidth(34); volPct:SetJustifyH("RIGHT")
     local volSlider = makeMiniSlider(win, { width = 90, height = 14, thumbW = 30, min = 0, max = 1, step = 0.05,
         get = function() return RAS:GetChannelVolume() end, format = function() return "" end,
@@ -383,7 +428,8 @@ local function build()
     win.spellSub = fs(win, 11, GOLD); win.spellSub:SetPoint("LEFT", win.sCount, "RIGHT", 10, 0)
     local addBox = makeEdit(win, 150, "add spellID", function(txt)
         local id = tonumber(txt)
-        if id then selGroup(true)[id] = true; RAS:Rebuild(); win.addBox:SetText(""); win:Refresh()
+        -- adding an ID that's already in the group adds another copy of it
+        if id then local g = selGroup(true); g[RAS:NewEntryKey(g, id)] = true; RAS:Rebuild(); win.addBox:SetText(""); win:Refresh()
             if C_Spell and C_Spell.RequestLoadSpellData then C_Spell.RequestLoadSpellData(id) end
         end
     end)
@@ -405,32 +451,67 @@ local function build()
                 if btn == "RightButton" then
                     local id = c.data.id; local st, sn = RAS:Selected(); local dl = RAS:IsDelayed(st, sn, id)
                     local own = RAS.db.spellChannel[id]
+                    -- Delay and a spell sound exclude each other (if both are already set, both stay usable to fix it)
+                    local hasSnd = RAS.db.spellSound[id] ~= nil
+                    local soundList = RAS:SpellSoundList()
                     local chanItems = { { text = "Default (" .. chanLabel(RAS:GetChannel()) .. ")", color = own and TEXT or GOLD, onClick = function() RAS.db.spellChannel[id] = nil; RAS:Rebuild(); win:Refresh() end } }
                     for _, ch in ipairs(CHANNELS) do
                         local v = ch[2]
                         chanItems[#chanItems + 1] = { text = ch[1], color = (own == v) and GOLD or TEXT, onClick = function() RAS.db.spellChannel[id] = v; RAS:Rebuild(); win:Refresh() end }
                     end
                     showMenu({
-                        { text = dl and "Undo Delay" or "Delay", color = GREEN, onClick = function() RAS:SetDelayed(st, sn, id, not dl); RAS:Rebuild(); win:Refresh() end },
+                        { text = dl and "Undo Delay" or "Delay", color = GREEN, onClick = function() RAS:SetDelayed(st, sn, id, not dl); RAS:Rebuild(); win:Refresh() end,
+                          disabled = hasSnd and not dl, tip = (hasSnd and not dl) and "Can't delay a spell with its own sound. Set Sound to None first." or nil },
                         { text = "Channel: " .. (own and chanLabel(own) or "Default"), color = GOLD, sub = chanItems },
-                        { text = "Remove", color = RED, onClick = function() local g = selGroup(true); g[id] = nil; RAS:SetDelayed(st, sn, id, false); RAS:Rebuild(); win:Refresh() end },
+                        { text = "Players: " .. playersSummary(id), color = BLUE, onClick = function() win.playersWin:Open(id) end },
+                        { text = "Sound: " .. (RAS.db.spellSound[id] or "Their own name"), color = TEXT,
+                          disabled = (dl and not hasSnd) or not soundList,
+                          tip = (dl and not hasSnd) and "Delayed spells can't have their own sound. Undo Delay first."
+                              or (not soundList and "No SharedMedia sounds found (none of your addons load LibSharedMedia).") or nil,
+                          open = function(b)   -- sound list opens to the right on hover, like a submenu
+                            showPicker(b, function(name, none) RAS.db.spellSound[id] = (not none) and name or nil; menu:Hide(); RAS:Rebuild(); win:Refresh() end,
+                                { source = soundList, preview = function(n) RAS:PreviewSpellSound(n) end, none = "Their own name", attached = true })
+                          end },
+                        { text = "Remove", color = RED, onClick = function()
+                            local g = selGroup(true); g[id] = nil; RAS:SetDelayed(st, sn, id, false)
+                            if type(id) == "string" then   -- a copy: drop its settings so a new copy starts clean
+                                RAS.db.spellChannel[id], RAS.db.spellPlayers[id], RAS.db.spellSound[id] = nil, nil, nil
+                            end
+                            RAS:Rebuild(); win:Refresh()
+                        end },
                     })
                 else toggle() end
             end)
-            c:SetScript("OnEnter", function() c.hl:SetColorTexture(1, 1, 1, 0.05); if c.data then GameTooltip:SetOwner(c, "ANCHOR_RIGHT"); GameTooltip:SetSpellByID(c.data.id); GameTooltip:Show() end end)
+            c:SetScript("OnEnter", function()
+                c.hl:SetColorTexture(1, 1, 1, 0.05)
+                if not c.data then return end
+                GameTooltip:SetOwner(c, "ANCHOR_RIGHT"); GameTooltip:SetSpellByID(c.data.sid)
+                local ch = RAS.db.spellChannel[c.data.id]
+                if ch then GameTooltip:AddLine("Channel: " .. chanLabel(ch), GOLD[1], GOLD[2], GOLD[3]) end
+                local sp = RAS.db.spellPlayers[c.data.id]
+                if sp and sp.mode then GameTooltip:AddLine("Players: " .. playersSummary(c.data.id), BLUE[1], BLUE[2], BLUE[3]) end
+                local snd = RAS.db.spellSound[c.data.id]
+                if snd then GameTooltip:AddLine("Sound: " .. snd, GREEN[1], GREEN[2], GREEN[3]) end
+                GameTooltip:Show()
+            end)
             c:SetScript("OnLeave", function() c.hl:SetColorTexture(1, 1, 1, 0); GameTooltip:Hide() end)
             return c
         end,
         function(cell, d)
             local st, sn = RAS:Selected()
             local g = RAS:GroupTable(st, sn, false); local on = g and g[d.id] and true or false
-            local tex = (C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(d.id)) or 134400
-            local nm = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(d.id)) or ("Spell " .. d.id)
+            local tex = (C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(d.sid)) or 134400
+            local nm = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(d.sid)) or ("Spell " .. d.sid)
             cell.icon.tex:SetTexture(tex); cell.icon.tex:SetDesaturated(not on)
             cell.name:SetText(trunc(nm, 18))
             cell.name:SetTextColor(on and TEXT[1] or MUTED[1], on and TEXT[2] or MUTED[2], on and TEXT[3] or MUTED[3])
-            local ch = RAS.db.spellChannel[d.id]
-            cell.id:SetText(ch and (d.id .. " |cffcca94d" .. (CHAN_TAG[ch] or ch) .. "|r") or d.id)
+            local ch, sp = RAS.db.spellChannel[d.id], RAS.db.spellPlayers[d.id]
+            local tag = ""
+            if ch then tag = tag .. " |cffcca94d" .. (CHAN_TAG[ch] or ch) .. "|r" end
+            if sp and sp.mode then tag = tag .. " |cff73b8ffP|r" end
+            if RAS.db.spellSound[d.id] then tag = tag .. " |cff4dcc75S|r" end
+            local idx = RAS.EntryIndex(d.id)
+            cell.id:SetText(d.sid .. (idx > 1 and (" |cffd9d9d9#" .. idx .. "|r") or "") .. tag)
             cell.delayMark:SetShown(RAS:IsDelayed(st, sn, d.id))
             cell.tog:refresh()
         end)
@@ -781,11 +862,94 @@ local function build()
     end
     function rw:Open(boss) self.boss = boss; self:Show(); self:Raise(); self:Refresh() end
 
+    -- PLAYERS popup (per spell): only some raiders, or everyone except some ----
+    local PMODES = { { "Everyone", nil }, { "Only these", "only" }, { "Everyone except", "except" } }
+    local function pmodeLabel(v) for _, m in ipairs(PMODES) do if m[2] == v then return m[1] end end return "Everyone" end
+    local PCOLS, PCW, PRH = 4, 132, 20
+    local pw = CreateFrame("Frame", "HexAuraSoundsPlayers", win)
+    pw:SetPoint("CENTER"); pw:SetFrameStrata("DIALOG"); pw:EnableMouse(true)
+    pw:SetMovable(true); pw:RegisterForDrag("LeftButton"); pw:SetScript("OnDragStart", pw.StartMoving); pw:SetScript("OnDragStop", pw.StopMovingOrSizing)
+    bg(pw, 0.06, 0.065, 0.075, 0.99); stroke(pw, GOLD, 1); pw:Hide(); win.playersWin = pw
+    pw.title = fs(pw, 13, GOLD); pw.title:SetPoint("TOPLEFT", 12, -10)
+    local pclose = softButton(pw, "\195\151", 34, 34, function() pw:Hide() end, MUTED); pclose:SetPoint("TOPRIGHT", -2, -2)
+    do local fp = pclose.t:GetFont(); if not pclose.t:SetFont(FONT, 32, "") then pclose.t:SetFont(fp, 32, "") end end
+    local function spSettings(create)
+        local t = RAS.db.spellPlayers[pw.spell]
+        if not t and create then t = { raiders = {} }; RAS.db.spellPlayers[pw.spell] = t end
+        return t
+    end
+    pw.mode = CreateFrame("Button", nil, pw); pw.mode:SetSize(130, 20); bg(pw.mode, 0.095, 0.105, 0.12); stroke(pw.mode, HAIR, 1)
+    pw.mode:RegisterForClicks("LeftButtonDown"); pw.mode:SetPoint("TOPLEFT", 12, -38)
+    pw.mode.t = fs(pw.mode, 12, TEXT); pw.mode.t:SetPoint("LEFT", 8, 0)
+    local pma = pw.mode:CreateTexture(nil, "ARTWORK"); pma:SetSize(12, 12); pma:SetPoint("RIGHT", -6, 0); pma:SetTexture(ARROW); pma:SetVertexColor(0.72, 0.75, 0.80)
+    pw.mode:SetScript("OnClick", function()
+        local cur = spSettings(false); cur = cur and cur.mode
+        local items = {}
+        for _, m in ipairs(PMODES) do
+            local v = m[2]
+            items[#items + 1] = { text = m[1], color = (cur == v) and GOLD or TEXT, onClick = function()
+                local t = spSettings(true); t.mode = v
+                if not v and not next(t.raiders) then RAS.db.spellPlayers[pw.spell] = nil end   -- back to default
+                RAS:Rebuild(); pw:Refresh()
+            end }
+        end
+        showMenu(items, pw.mode)
+    end)
+    pw.count = fs(pw, 11, MUTED); pw.count:SetPoint("LEFT", pw.mode, "RIGHT", 10, 0)
+    pw.cells = {}
+    local function getCell(i)
+        local c = pw.cells[i]; if c then return c end
+        c = CreateFrame("Button", nil, pw); c:SetSize(PCW - 4, PRH); c:RegisterForClicks("LeftButtonDown")
+        c.hl = c:CreateTexture(nil, "BACKGROUND"); c.hl:SetAllPoints(); c.hl:SetColorTexture(1, 1, 1, 0)
+        c.box = CreateFrame("Frame", nil, c); c.box:SetSize(11, 11); c.box:SetPoint("LEFT", 4, 0); stroke(c.box, HAIR, 1)
+        c.box.fill = c.box:CreateTexture(nil, "ARTWORK"); c.box.fill:SetPoint("TOPLEFT", 1, -1); c.box.fill:SetPoint("BOTTOMRIGHT", -1, 1)
+        c.t = fs(c, 12, TEXT); c.t:SetPoint("LEFT", c.box, "RIGHT", 6, 0)
+        c:SetScript("OnEnter", function() c.hl:SetColorTexture(1, 1, 1, 0.05) end)
+        c:SetScript("OnLeave", function() c.hl:SetColorTexture(1, 1, 1, 0) end)
+        c:SetScript("OnClick", function()
+            local t = spSettings(false); if not (t and t.mode) then return end
+            t.raiders[c.raider] = (not t.raiders[c.raider]) or nil
+            RAS:Rebuild(); pw:Refresh()
+        end)
+        pw.cells[i] = c; return c
+    end
+    pw.clear = softButton(pw, "clear", 50, 20, function()
+        local t = spSettings(false); if t then wipe(t.raiders); RAS:Rebuild(); pw:Refresh() end
+    end, MUTED)
+    pw.clear:SetPoint("BOTTOMLEFT", 8, 10)
+    function pw:Refresh()
+        local t = spSettings(false); local mode = t and t.mode
+        local sid, idx = RAS.EntrySpell(self.spell), RAS.EntryIndex(self.spell)
+        local nm = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(sid)) or ("Spell " .. sid)
+        self.title:SetText("Players:  " .. nm .. (idx > 1 and (" #" .. idx) or "") .. "  |cff6b737f(" .. sid .. ")|r")
+        self.mode.t:SetText(pmodeLabel(mode))
+        local n = 0
+        for i, r in ipairs(RAS.playerOrder) do
+            local c = getCell(i); c.raider = r
+            c:ClearAllPoints(); c:SetPoint("TOPLEFT", 12 + ((i - 1) % PCOLS) * PCW, -68 - math.floor((i - 1) / PCOLS) * PRH)
+            local on = t and t.raiders[r]
+            if on then n = n + 1 end
+            local col = on and (mode == "except" and RED or GREEN)
+            if col then c.box.fill:SetColorTexture(col[1], col[2], col[3], 0.9) else c.box.fill:SetColorTexture(0.16, 0.17, 0.19, 1) end
+            c.t:SetText(r); c:SetAlpha(mode and 1 or 0.4); c:EnableMouse(mode ~= nil)
+            c:Show()
+        end
+        for i = #RAS.playerOrder + 1, #self.cells do self.cells[i]:Hide() end
+        if mode == "only" then self.count:SetText(n .. " selected: only they get this spell's sound")
+        elseif mode == "except" then self.count:SetText(n .. " selected: they don't get this spell's sound")
+        else self.count:SetText("every raider gets this spell's sound") end
+        self.clear:SetShown(mode ~= nil)
+        local rows = math.max(1, math.ceil(#RAS.playerOrder / PCOLS))
+        self:SetSize(24 + PCOLS * PCW, 68 + rows * PRH + 44)
+        win:Refresh()   -- the spell's "P" tag
+    end
+    function pw:Open(id) self.spell = id; self:Show(); self:Raise(); self:Refresh() end
+
     -- light blue, on the "+ add" row
     local rulesBtn = softButton(win, "Boss rules", 100, 20, function()
         local _, sn = RAS:Selected()
         if rw:IsShown() and rw.boss == sn then rw:Hide() else rw:Open(sn) end
-    end, { 0.45, 0.72, 1.0 })
+    end, BLUE)
     rulesBtn:SetPoint("LEFT", addBtn, "RIGHT", 12, 0); win.rulesBtn = rulesBtn
 
     -- footer + scale ---------------------------------------------------------
@@ -820,7 +984,12 @@ local function build()
         -- spells for the selected group
         local spells = RAS:GroupTracked(st, sn); self.sCount:SetText(#spells)
         local slist, needLoad = {}, false
-        for _, s in ipairs(spells) do slist[#slist + 1] = { id = s }; if C_Spell and C_Spell.GetSpellName and not C_Spell.GetSpellName(s) then needLoad = true; if C_Spell.RequestLoadSpellData then C_Spell.RequestLoadSpellData(s) end end end
+        -- id = entry key (settings), sid = the spell itself (name, icon, tooltip)
+        for _, s in ipairs(spells) do
+            local sid = RAS.EntrySpell(s)
+            slist[#slist + 1] = { id = s, sid = sid }
+            if C_Spell and C_Spell.GetSpellName and not C_Spell.GetSpellName(sid) then needLoad = true; if C_Spell.RequestLoadSpellData then C_Spell.RequestLoadSpellData(sid) end end
+        end
         self.spellGrid:SetData(slist)
         if needLoad and not self._pl then self._pl = true; C_Timer.After(0.4, function() self._pl = nil; if self:IsShown() then self:Refresh() end end) end
         -- characters

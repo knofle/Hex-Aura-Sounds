@@ -354,10 +354,28 @@ local function totalSpellCount(self)
 end
 RAS.TotalSpellCount = totalSpellCount
 
--- registration is blocked in combat, while dead, and while a Combat/Encounter
--- restriction is active (tracked via ADDON_RESTRICTION_STATE_CHANGED)
-local _restrictions = {}
-local function restricted() return next(_restrictions) ~= nil end
+-- registration is blocked in combat, while dead, and while an addon restriction
+-- is in force: combat, boss encounter, Mythic+, PvP match or a restricted map.
+-- Tracked from ADDON_RESTRICTION_STATE_CHANGED (which fires as "Activating",
+-- before it's enforced) and also asked directly, so it holds after a /reload.
+local BLOCKING = { "Combat", "Encounter", "ChallengeMode", "PvPMatch", "Map" }
+local _restrictions = {}   -- [type] = true from the event's Activating/Active until Inactive
+local function blockingType(t)
+    local T = Enum and Enum.AddOnRestrictionType
+    if not T then return false end
+    for _, k in ipairs(BLOCKING) do if T[k] ~= nil and T[k] == t then return true end end
+    return false
+end
+local function restricted()
+    if next(_restrictions) then return true end
+    local CRA, T = C_RestrictedActions, Enum and Enum.AddOnRestrictionType
+    if CRA and CRA.IsAddOnRestrictionActive and T then
+        for _, k in ipairs(BLOCKING) do
+            if T[k] ~= nil and CRA.IsAddOnRestrictionActive(T[k]) then return true end
+        end
+    end
+    return false
+end
 
 local function canRegister()
     if InCombatLockdown() then return false end
@@ -830,12 +848,11 @@ f:SetScript("OnEvent", function(_, event, ...)
 
     elseif event == "ADDON_RESTRICTION_STATE_CHANGED" then
         local rType, rState = ...
-        local T = Enum and Enum.AddOnRestrictionType
         local S = Enum and Enum.AddOnRestrictionState
-        if T and S and (rType == T.Combat or rType == T.Encounter) then
-            if rState == S.Active then
+        if S and blockingType(rType) then
+            if rState ~= S.Inactive then   -- Activating or Active
                 _restrictions[rType] = true
-            elseif rState == S.Inactive then
+            else
                 _restrictions[rType] = nil
                 RAS:RulesRestore()
                 if not restricted() then

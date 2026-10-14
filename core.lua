@@ -355,10 +355,11 @@ end
 RAS.TotalSpellCount = totalSpellCount
 
 -- registration is blocked in combat, while dead, and while an addon restriction
--- is in force: combat, boss encounter, Mythic+, PvP match or a restricted map.
+-- is in force: combat or a boss encounter. Map, Mythic+ and PvP match are left
+-- out: they stay on for a whole raid / key / match, and registering there is the point.
 -- Tracked from ADDON_RESTRICTION_STATE_CHANGED (which fires as "Activating",
 -- before it's enforced) and also asked directly, so it holds after a /reload.
-local BLOCKING = { "Combat", "Encounter", "ChallengeMode", "PvPMatch", "Map" }
+local BLOCKING = { "Combat", "Encounter" }
 local _restrictions = {}   -- [type] = true from the event's Activating/Active until Inactive
 local function blockingType(t)
     local T = Enum and Enum.AddOnRestrictionType
